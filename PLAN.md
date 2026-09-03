@@ -184,7 +184,7 @@ Command-line flags defined in `llvm_util/cmd_args_list.h` are supported directly
 | `--disable-poison-input` | Treat function arguments as poison-free values |
 | `--src-fn=NAME` | Name of the source function |
 | `--tgt-fn=NAME` | Name of the target function |
-| `--dump-cuts=DIR` | Serialize generated units to LLVM IR files in DIR |
+| `--dump-units=DIR` | Serialize generated units to LLVM IR files in DIR |
 | `--tv-verbose` | Output detailed progress for each unit and assume check |
 
 ## Alive2 API integration

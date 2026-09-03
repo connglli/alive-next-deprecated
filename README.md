@@ -438,6 +438,6 @@ The driver accepts input functions across two files or within a single file defi
 ./build/alive-tv-next combined.srctgt.ll
 ```
 
-Supported options include `--smt-to=N`, `--disable-undef-input`, `--disable-poison-input`, `--src-fn=NAME`, `--tgt-fn=NAME`, `--dump-cuts=DIR`, and `--tv-verbose`.
+Supported options include `--smt-to=N`, `--disable-undef-input`, `--disable-poison-input`, `--src-fn=NAME`, `--tgt-fn=NAME`, `--dump-units=DIR`, and `--tv-verbose`.
 
 When refinement holds for all units, `alive-tv-next` prints `Transformation seems to be correct!` and exits with code 0. When refinement fails or cannot be proved, diagnostic errors are printed and the process exits with code 1.

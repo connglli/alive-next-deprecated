@@ -45,7 +45,7 @@ The `alive-tv-next` driver accepts paired functions either in one file or across
 ./alive-tv-next --tv-verbose combined.srctgt.ll
 ```
 
-Command-line flags defined in `llvm_util/cmd_args_list.h` are supported, including `--smt-to`, `--disable-undef-input`, and `--dump-cuts`.
+Command-line flags defined in `llvm_util/cmd_args_list.h` are supported, including `--smt-to`, `--disable-undef-input`, and `--dump-units`.
 
 When all units verify, the driver outputs an acceptance message and terminates with exit code 0.
 
