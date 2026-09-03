@@ -626,18 +626,18 @@ void injectObligationAssume(llvm::Function *fn, const FlagObligation &ob,
 }
 
 // Standalone assume-check TvUnit for proposeFromRanges:
-// * src: constructs the slice union in parent_src for fact and obligation
+// * src: returns true unconditionally.
+// * tgt: constructs the slice union in parent_fn for fact and obligation
 //   operands, returning the conjunction of all claims.
-// * tgt: returns true unconditionally.
 //
-// When the check passes, all claims hold for every valid input to parent_src,
-// ensuring that assume injection into the unit preserves soundness.
+// Under Alive2 refinement (tgt refines src), proving that @tgt refines @src
+// requires @tgt to evaluate to true and be non-poison on all inputs.
 TvUnit
 buildCombinedFactCheck(const std::vector<KnownFact> &facts,
                        const std::vector<FlagObligation> &obligations,
                        const std::vector<std::vector<llvm::Type *>> &ob_op_tys,
                        const std::vector<unsigned> &ob_result_bws,
-                       llvm::Function &parent_src, llvm::Module &parent_module,
+                       llvm::Function &parent_fn, llvm::Module &parent_module,
                        llvm::LLVMContext &ctx, const std::string &diag_name) {
   TvUnit out;
   out.name = diag_name;
@@ -670,21 +670,28 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
     out.tgt_fn->getArg(i)->setName(all_args[i]->getName());
   }
 
-  // @src: rebuild the slice union, then AND all per-fact claims.
+  // @src: returns true unconditionally.
   {
     llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", out.src_fn);
+    llvm::IRBuilder<> bld(bb);
+    bld.CreateRet(llvm::ConstantInt::getTrue(ctx));
+  }
+
+  // @tgt: rebuild the slice union, then AND all per-fact claims.
+  {
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", out.tgt_fn);
     llvm::IRBuilder<> bld(bb);
 
     std::map<llvm::Value *, llvm::Value *> vmap;
     for (size_t i = 0; i < all_args.size(); ++i)
-      vmap[all_args[i]] = out.src_fn->getArg(i);
+      vmap[all_args[i]] = out.tgt_fn->getArg(i);
 
     std::set<llvm::Instruction *> inst_set;
     for (auto &f : facts)
       for (auto *I : f.slice.insts)
         inst_set.insert(I);
 
-    for (llvm::BasicBlock &par_bb : parent_src) {
+    for (llvm::BasicBlock &par_bb : parent_fn) {
       for (llvm::Instruction &I : par_bb) {
         if (!inst_set.count(&I))
           continue;
@@ -710,7 +717,7 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
 
     // Per-fact claims.
     for (auto &f : facts) {
-      llvm::Value *parent_val = findValueByName(f.name, parent_src);
+      llvm::Value *parent_val = findValueByName(f.name, parent_fn);
       if (!parent_val)
         continue;
       auto vit = vmap.find(parent_val);
@@ -731,7 +738,7 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
           ops.push_back(llvm::ConstantInt::get(ob_op_tys[k][i], key.const_val));
           continue;
         }
-        llvm::Value *parent_val = findValueByName(key.name, parent_src);
+        llvm::Value *parent_val = findValueByName(key.name, parent_fn);
         if (!parent_val) {
           ok = false;
           break;
@@ -750,13 +757,6 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
     }
 
     bld.CreateRet(result ? result : llvm::ConstantInt::getTrue(ctx));
-  }
-
-  // @tgt: trivially true.
-  {
-    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", out.tgt_fn);
-    llvm::IRBuilder<> bld(bb);
-    bld.CreateRet(llvm::ConstantInt::getTrue(ctx));
   }
 
   return out;
