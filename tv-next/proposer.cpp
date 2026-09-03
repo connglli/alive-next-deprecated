@@ -670,10 +670,18 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
     out.tgt_fn->getArg(i)->setName(all_args[i]->getName());
   }
 
-  // @src: returns true unconditionally.
+  // @src: returns true unconditionally under well-defined input assumptions.
   {
     llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", out.src_fn);
     llvm::IRBuilder<> bld(bb);
+    llvm::Function *assume_fn = llvm::Intrinsic::getOrInsertDeclaration(
+        out.module.get(), llvm::Intrinsic::assume);
+    for (size_t i = 0; i < all_args.size(); ++i) {
+      llvm::Value *arg = out.src_fn->getArg(i);
+      llvm::Value *fz = bld.CreateFreeze(arg, arg->getName() + "_fz");
+      llvm::Value *pf = bld.CreateICmpEQ(arg, fz, arg->getName() + "_pf");
+      bld.CreateCall(assume_fn, {pf});
+    }
     bld.CreateRet(llvm::ConstantInt::getTrue(ctx));
   }
 
@@ -681,6 +689,14 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
   {
     llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", out.tgt_fn);
     llvm::IRBuilder<> bld(bb);
+    llvm::Function *assume_fn = llvm::Intrinsic::getOrInsertDeclaration(
+        out.module.get(), llvm::Intrinsic::assume);
+    for (size_t i = 0; i < all_args.size(); ++i) {
+      llvm::Value *arg = out.tgt_fn->getArg(i);
+      llvm::Value *fz = bld.CreateFreeze(arg, arg->getName() + "_fz");
+      llvm::Value *pf = bld.CreateICmpEQ(arg, fz, arg->getName() + "_pf");
+      bld.CreateCall(assume_fn, {pf});
+    }
 
     std::map<llvm::Value *, llvm::Value *> vmap;
     for (size_t i = 0; i < all_args.size(); ++i)
