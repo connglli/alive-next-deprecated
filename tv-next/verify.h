@@ -1,23 +1,17 @@
-// alive-tv-next: per-unit alive2 dispatch.
+// Per-unit refinement verification using Alive2.
 //
-// Modeled on llvm_util::compare.cpp's `verify(F1, F2, ...)` helper:
-//   1. llvm2alive each function → IR::Function
-//   2. Build a tools::Transform from the pair
-//   3. preprocess + TransformVerify::verify
-//   4. Translate alive2's util::Errors into a UnitVerdict
+// Verification executes the following steps:
+// 1. Translates src_fn and tgt_fn to Alive2 IR using llvm2alive.
+// 2. Constructs a Transform and checks for syntactic equality.
+// 3. Preprocesses and runs TransformVerify::verify.
+// 4. Converts Alive2 Errors into a UnitVerdict.
 //
-// We don't go through llvm_util::Verifier::compareFunctions because (a) it
-// prints to a stream we don't want cluttered per-unit, and (b) Phase 3 needs
-// to inject preconditions into the Transform — direct API access is the
-// right path.
-//
-// Phase 3: when a unit returns Unsound or FailedToProve and parent context
-// is supplied, the verifier consults `proposeAssume` for a hand-coded
-// assume proposer. If a proposer fires, it produces a *modified unit*
-// (with `llvm.assume(precondition)` injected) and a *standalone
-// assume-check* (proves the precondition holds in the parent's input
-// space). Both must verify; the proposer-augmented verdict then replaces
-// the original.
+// When initial verification yields Unsound or FailedToProve and parent function
+// contexts are provided, verifyTvUnit invokes proposeAssume. If a candidate
+// precondition is proposed, all standalone assume checks are verified first.
+// If every check passes, the unit is re-verified with injected assumptions.
+// If the re-verification passes, the verdict upgrades to Correct. If any step
+// fails, the failure verdict is returned with diagnostics.
 
 #pragma once
 
@@ -34,11 +28,12 @@
 
 namespace alive_tv_next {
 
+// Verification verdict for a single TvUnit.
 struct UnitVerdict {
-  std::string name; // unit identifier (e.g., "unit@v3")
-  bool passed = false;
-  std::string error_message; // populated on fail / fail-to-prove / error
-  std::string proposer_name; // populated when a proposer was used
+  std::string name;          // Unit identifier.
+  bool passed = false;       // True when refinement holds.
+  std::string error_message; // Populated on failure or error.
+  std::string proposer_name; // Name of the proposer if assumptions were used.
   enum class Status {
     Correct,
     Unsound,
@@ -49,29 +44,20 @@ struct UnitVerdict {
   } status = Status::Error;
 };
 
-// Callback invoked after each TvUnit (original, assume-check, modified) is
-// verified. Lets callers render verdicts as they happen, including derivative
-// units the proposer generates internally. The callback sees the same TvUnit
-// instance the verifier just ran on; do not retain references past the call.
+// Callback invoked after each unit verification attempt.
 using UnitProgressFn = std::function<void(const TvUnit &, const UnitVerdict &)>;
 
-// Run alive2 on a single TvUnit. `tli` and `smt_init` must already be
-// initialized by the caller (typically once in main).
+// Verifies refinement of a single TvUnit using Alive2.
 //
-// `parent_src` and `parent_tgt` are optional: when both are non-null, failed
-// verdicts (Unsound / FailedToProve) trigger the assume-proposer retry path.
-// They should be the @src and @tgt parent functions that the TvUnit was
-// lifted from. The proposer uses both: each is the anchor for one side's
-// range analysis and one of the standalone soundness checks (chain
-// refinement bridges between them).
-// `dump_dir`, when non-empty, writes the original TvUnit and any proposer-
-// generated units (modified unit + assume-check) to `<dump_dir>/<name>.ll`.
-// `context_header`, when non-empty, is prepended verbatim to each dumped
-// file — typically a `; `-prefixed comment block produced by the caller that
-// locates the unit inside its parent functions.
-// `progress`, when set, is invoked after each runOnce — once for the
-// original unit, once per assume-check, and once for the modified unit (when
-// the proposer fires).
+// Preconditions: tli and smt_init must be initialized.
+//
+// When parent_src and parent_tgt are non-null, failed verdicts trigger assume
+// proposal and retry.
+//
+// When dump_dir is non-empty, writes evaluated units to dump_dir/<name>.ll,
+// prepending context_header if non-empty.
+//
+// When progress is set, invokes the callback after each verification run.
 UnitVerdict verifyTvUnit(TvUnit &unit, llvm::TargetLibraryInfoWrapperPass &tli,
                          smt::smt_initializer &smt_init,
                          llvm::Function *parent_src = nullptr,

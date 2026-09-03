@@ -1,14 +1,14 @@
-// tv-next-range-test — unit tests for tv-next/range.cpp
+// tv-next-range-test: unit tests for tv-next/range.h and range.cpp
 //
 // Builds LLVM IR programmatically, seeds argument ranges, runs
-// computeRanges, and checks the derived bounds and well-definedness
-// flags. Exit 0 on all-pass, non-zero on any failure.
+// computeRanges, and checks derived bounds and well-definedness
+// flags. Returns 0 when all tests pass, and non-zero on any failure.
 //
-// Each test function creates its own LLVMContext / Module / Function so
-// tests are fully independent. Covered cases:
+// Each test function creates an isolated LLVMContext, Module, and Function.
+// Test coverage includes:
 //   and, or, urem, udiv, lshr, ashr, shl (+nuw/nsw),
 //   add/sub/mul (+nuw/nsw), select, freeze, zext, sext, trunc,
-//   cross-derivation (u→s, s→u), ConstantInt lazy synthesis,
+//   cross-derivation (u->s, s->u), ConstantInt lazy synthesis,
 //   multi-instruction chains, and well-definedness flag propagation.
 
 #include "tv-next/range.h"
@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-// ── harness ───────────────────────────────────────────────────────────────
+// -- harness ---------------------------------------------------------------
 
 static int g_pass = 0, g_fail = 0;
 static std::string g_ctx;
@@ -46,7 +46,7 @@ static void chk(bool ok, const char *expr, int line) {
 
 #define CHECK(e) chk((e), #e, __LINE__)
 
-// ── range query helpers ───────────────────────────────────────────────────
+// -- range query helpers ---------------------------------------------------
 // Avoid template-argument commas inside CHECK macros by wrapping range
 // comparisons in functions. The `make_pair<T1, T2>` pattern would split
 // macro args at the comma between T1 and T2.
@@ -90,7 +90,7 @@ static bool inMap(const alive_tv_next::RangeMap &m, const llvm::Value *V) {
   return m.find(V) != m.end();
 }
 
-// ── seed builders ─────────────────────────────────────────────────────────
+// -- seed builders ---------------------------------------------------------
 
 static alive_tv_next::KnownRange uSeed(unsigned bw, uint64_t lo, uint64_t hi) {
   alive_tv_next::KnownRange r;
@@ -110,9 +110,9 @@ static llvm::Instruction *asI(llvm::Value *v) {
   return llvm::cast<llvm::Instruction>(v);
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────
+// -- tests -----------------------------------------------------------------
 
-// and X, C (non-negative constant on RHS) → u=[0,C], crossDerive fills s=u
+// and X, C (non-negative constant on RHS) -> u=[0,C], crossDerive fills s=u
 static void test_and_const_rhs() {
   begin("and_const_rhs");
   llvm::LLVMContext ctx;
@@ -128,12 +128,12 @@ static void test_and_const_rhs() {
 
   auto map = alive_tv_next::computeRanges({asI(r)}, /*seed=*/{});
   CHECK(uEq(map, r, 0, 31));
-  CHECK(sEq(map, r, 0, 31)); // crossDerive: u.hi=31 non-negative → s = u
+  CHECK(sEq(map, r, 0, 31)); // crossDerive: u.hi=31 non-negative -> s = u
   CHECK(!undefFree(map, r));
   CHECK(!poisonFree(map, r));
 }
 
-// and C, X (constant on LHS) — tryConst checks both orderings
+// and C, X (constant on LHS) :  tryConst checks both orderings
 static void test_and_const_lhs() {
   begin("and_const_lhs");
   llvm::LLVMContext ctx;
@@ -151,7 +151,7 @@ static void test_and_const_lhs() {
   CHECK(uEq(map, r, 0, 63));
 }
 
-// and X, Y (both u-ranges known) → [0, min(hi_x, hi_y)]
+// and X, Y (both u-ranges known) -> [0, min(hi_x, hi_y)]
 static void test_and_both_bounded() {
   begin("and_both_bounded");
   llvm::LLVMContext ctx;
@@ -186,7 +186,7 @@ static void test_or_bounded() {
   llvm::Argument *x = fn->getArg(0), *y = fn->getArg(1);
   auto *r = b.CreateOr(x, y, "r");
 
-  // x ∈ [0,15] (4 active bits), y ∈ [0,7] (3 active bits)
+  // x in [0,15] (4 active bits), y in [0,7] (3 active bits)
   // lo = max(0,0)=0; hi = getLowBitsSet(16, max(4,3)=4) = 0xF = 15
   alive_tv_next::RangeMap seed;
   seed[x] = uSeed(16, 0, 15);
@@ -196,7 +196,7 @@ static void test_or_bounded() {
   CHECK(sEq(map, r, 0, 15)); // crossDerive: u.hi=15 non-negative in i16
 }
 
-// urem X, C → [0, C-1]
+// urem X, C -> [0, C-1]
 static void test_urem_const() {
   begin("urem_const");
   llvm::LLVMContext ctx;
@@ -214,7 +214,7 @@ static void test_urem_const() {
   CHECK(uEq(map, r, 0, 99));
 }
 
-// udiv X, C with seeded X → [lo/C, hi/C]
+// udiv X, C with seeded X -> [lo/C, hi/C]
 static void test_udiv_const_seeded() {
   begin("udiv_const_seeded");
   llvm::LLVMContext ctx;
@@ -234,7 +234,7 @@ static void test_udiv_const_seeded() {
   CHECK(uEq(map, r, 0, 9)); // [0/10, 99/10] = [0, 9]
 }
 
-// lshr X, C with seeded X → [lo>>C, hi>>C]
+// lshr X, C with seeded X -> [lo>>C, hi>>C]
 static void test_lshr_const_seeded() {
   begin("lshr_const_seeded");
   llvm::LLVMContext ctx;
@@ -254,7 +254,7 @@ static void test_lshr_const_seeded() {
   CHECK(uEq(map, r, 0, 31)); // [0>>2, 127>>2] = [0, 31]
 }
 
-// ashr X, C with seeded signed X → [lo ashr C, hi ashr C] (signed)
+// ashr X, C with seeded signed X -> [lo ashr C, hi ashr C] (signed)
 static void test_ashr_const_seeded() {
   begin("ashr_const_seeded");
   llvm::LLVMContext ctx;
@@ -274,7 +274,7 @@ static void test_ashr_const_seeded() {
   CHECK(sEq(map, r, -4, 3)); // [-8 ashr 1, 6 ashr 1] = [-4, 3]
 }
 
-// shl nuw X, C with seeded unsigned X → [lo<<C, hi<<C]
+// shl nuw X, C with seeded unsigned X -> [lo<<C, hi<<C]
 static void test_shl_nuw_seeded() {
   begin("shl_nuw_seeded");
   llvm::LLVMContext ctx;
@@ -296,7 +296,7 @@ static void test_shl_nuw_seeded() {
   CHECK(uEq(map, r, 0, 80)); // [0<<3, 10<<3] = [0, 80]
 }
 
-// shl nsw X, C with seeded non-negative signed X → [lo<<C, hi<<C] signed;
+// shl nsw X, C with seeded non-negative signed X -> [lo<<C, hi<<C] signed;
 // crossDerive fills u = s since s.lo = 0 (non-negative)
 static void test_shl_nsw_seeded() {
   begin("shl_nsw_seeded");
@@ -317,10 +317,10 @@ static void test_shl_nsw_seeded() {
   seed[arg] = sSeed(32, 0, 7);
   auto map = alive_tv_next::computeRanges({r}, seed);
   CHECK(sEq(map, r, 0, 28)); // [0<<2, 7<<2] = [0, 28]
-  CHECK(uEq(map, r, 0, 28)); // crossDerive: s.lo=0 non-negative → u = s
+  CHECK(uEq(map, r, 0, 28)); // crossDerive: s.lo=0 non-negative -> u = s
 }
 
-// add nuw with seeded unsigned operands → [lo_x+lo_y, hi_x+hi_y]
+// add nuw with seeded unsigned operands -> [lo_x+lo_y, hi_x+hi_y]
 static void test_add_nuw() {
   begin("add_nuw");
   llvm::LLVMContext ctx;
@@ -342,7 +342,7 @@ static void test_add_nuw() {
   CHECK(uEq(map, r, 15, 150));
 }
 
-// add nsw with seeded signed operands → [lo_x+lo_y, hi_x+hi_y] signed
+// add nsw with seeded signed operands -> [lo_x+lo_y, hi_x+hi_y] signed
 static void test_add_nsw() {
   begin("add_nsw");
   llvm::LLVMContext ctx;
@@ -364,7 +364,7 @@ static void test_add_nsw() {
   CHECK(sEq(map, r, -15, 50)); // [-10+(-5), 20+30] = [-15, 50]
 }
 
-// sub nuw: conservative upper bound [0, hi_x − lo_y]
+// sub nuw: conservative upper bound [0, hi_x - lo_y]
 static void test_sub_nuw() {
   begin("sub_nuw");
   llvm::LLVMContext ctx;
@@ -383,11 +383,11 @@ static void test_sub_nuw() {
   seed[x] = uSeed(32, 100, 200);
   seed[y] = uSeed(32, 10, 50);
   auto map = alive_tv_next::computeRanges({r}, seed);
-  // requires hi_x >= lo_y: 200 >= 10 ✓; result = [0, hi_x − lo_y] = [0, 190]
+  // requires hi_x >= lo_y: 200 >= 10 ok; result = [0, hi_x - lo_y] = [0, 190]
   CHECK(uEq(map, r, 0, 190));
 }
 
-// mul nuw with seeded unsigned operands → [lo_x*lo_y, hi_x*hi_y]
+// mul nuw with seeded unsigned operands -> [lo_x*lo_y, hi_x*hi_y]
 static void test_mul_nuw() {
   begin("mul_nuw");
   llvm::LLVMContext ctx;
@@ -409,7 +409,7 @@ static void test_mul_nuw() {
   CHECK(uEq(map, r, 2, 50));
 }
 
-// zext i16 → i64 with seeded unsigned input
+// zext i16 -> i64 with seeded unsigned input
 static void test_zext() {
   begin("zext");
   llvm::LLVMContext ctx;
@@ -430,7 +430,7 @@ static void test_zext() {
   CHECK(uEq(map, r, 0, 1000));
 }
 
-// sext i16 → i64 with seeded signed input (including negative values)
+// sext i16 -> i64 with seeded signed input (including negative values)
 static void test_sext() {
   begin("sext");
   llvm::LLVMContext ctx;
@@ -451,7 +451,7 @@ static void test_sext() {
   CHECK(sEq(map, r, -50, 50));
 }
 
-// trunc i64 → i8 when the value fits (hi has ≤ 8 active bits)
+// trunc i64 -> i8 when the value fits (hi has <= 8 active bits)
 static void test_trunc_safe() {
   begin("trunc_safe");
   llvm::LLVMContext ctx;
@@ -466,14 +466,14 @@ static void test_trunc_safe() {
   llvm::Argument *arg = fn->getArg(0);
   auto *r = b.CreateTrunc(arg, i8, "r");
 
-  // hi=127 has 7 active bits ≤ 8 → safe
+  // hi=127 has 7 active bits <= 8 -> safe
   alive_tv_next::RangeMap seed;
   seed[arg] = uSeed(64, 0, 127);
   auto map = alive_tv_next::computeRanges({asI(r)}, seed);
   CHECK(uEq(map, r, 0, 127));
 }
 
-// trunc i64 → i8 when the high bits would be lost → no range derived
+// trunc i64 -> i8 when the high bits would be lost -> no range derived
 static void test_trunc_unsafe() {
   begin("trunc_unsafe");
   llvm::LLVMContext ctx;
@@ -488,14 +488,14 @@ static void test_trunc_unsafe() {
   llvm::Argument *arg = fn->getArg(0);
   auto *r = b.CreateTrunc(arg, i8, "r");
 
-  // hi=256 has 9 active bits > 8 → transfer returns nullopt
+  // hi=256 has 9 active bits > 8 -> transfer returns nullopt
   alive_tv_next::RangeMap seed;
   seed[arg] = uSeed(64, 0, 256);
   auto map = alive_tv_next::computeRanges({asI(r)}, seed);
   CHECK(!inMap(map, r));
 }
 
-// select cond, X, Y → join of u-ranges across both arms
+// select cond, X, Y -> join of u-ranges across both arms
 static void test_select() {
   begin("select");
   llvm::LLVMContext ctx;
@@ -511,7 +511,7 @@ static void test_select() {
                  *fv   = fn->getArg(2);
   auto *r = b.CreateSelect(cond, tv, fv, "r");
 
-  // tv ∈ [0,10], fv ∈ [5,20] → result ∈ [min(0,5), max(10,20)] = [0, 20]
+  // tv in [0,10], fv in [5,20] -> result in [min(0,5), max(10,20)] = [0, 20]
   alive_tv_next::RangeMap seed;
   seed[tv] = uSeed(32, 0, 10);
   seed[fv] = uSeed(32, 5, 20);
@@ -563,7 +563,7 @@ static void test_freeze_no_bounds() {
 }
 
 // well-definedness flags propagate: undef_free+poison_free on both operands
-// (ConstantInt is always well-defined) → result flags are both true
+// (ConstantInt is always well-defined) -> result flags are both true
 static void test_flags_propagate() {
   begin("flags_propagate");
   llvm::LLVMContext ctx;
@@ -588,7 +588,7 @@ static void test_flags_propagate() {
   CHECK(poisonFree(map, r));
 }
 
-// cross-derivation u→s: u.hi non-negative → s automatically filled in
+// cross-derivation u->s: u.hi non-negative -> s automatically filled in
 static void test_cross_u_to_s() {
   begin("cross_u_to_s");
   llvm::LLVMContext ctx;
@@ -600,7 +600,7 @@ static void test_cross_u_to_s() {
   auto *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
   llvm::IRBuilder<> b(bb);
   llvm::Argument *arg = fn->getArg(0);
-  // urem gives u=[0,49]; hi=49 is non-negative in i32 → crossDerive fills s=u
+  // urem gives u=[0,49]; hi=49 is non-negative in i32 -> crossDerive fills s=u
   auto *r = b.CreateURem(arg, llvm::ConstantInt::get(i32, 50), "r");
 
   auto map = alive_tv_next::computeRanges({asI(r)}, /*seed=*/{});
@@ -608,7 +608,7 @@ static void test_cross_u_to_s() {
   CHECK(sEq(map, r, 0, 49));
 }
 
-// cross-derivation s→u: s.lo non-negative → u automatically filled in
+// cross-derivation s->u: s.lo non-negative -> u automatically filled in
 static void test_cross_s_to_u() {
   begin("cross_s_to_u");
   llvm::LLVMContext ctx;
@@ -629,7 +629,7 @@ static void test_cross_s_to_u() {
   seed[arg] = sSeed(32, 0, 10); // lo=0 non-negative
   auto map = alive_tv_next::computeRanges({r}, seed);
   CHECK(sEq(map, r, 0, 20));
-  CHECK(uEq(map, r, 0, 20)); // crossDerive: s.lo=0 → u = s
+  CHECK(uEq(map, r, 0, 20)); // crossDerive: s.lo=0 -> u = s
 }
 
 // ConstantInt lazy synthesis: the ConstantInt divisor `5` is not in the seed
@@ -637,7 +637,7 @@ static void test_cross_s_to_u() {
 // via `or %arg, C` where the constant contributes to the upper bound.
 //   arg seeded u=[0,0] (0 active bits), C=4 (3 active bits)
 //   lo = max(0, 4) = 4; hi = getLowBitsSet(32, max(0,3)=3) = 7
-//   → r.u = [4, 7]
+//   -> r.u = [4, 7]
 static void test_const_int_lazy_synthesis() {
   begin("const_int_lazy_synthesis");
   llvm::LLVMContext ctx;
@@ -671,8 +671,8 @@ static void test_chain_two_instrs() {
   auto *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
   llvm::IRBuilder<> b(bb);
   llvm::Argument *x = fn->getArg(0), *y = fn->getArg(1);
-  // %amt = urem i64 %y, 8     → u=[0, 7]
-  // %div = udiv i64 %x, 4     → seeded x∈[0,100]: u=[0, 25]
+  // %amt = urem i64 %y, 8     -> u=[0, 7]
+  // %div = udiv i64 %x, 4     -> seeded xin[0,100]: u=[0, 25]
   auto *amt = b.CreateURem(y, llvm::ConstantInt::get(i64, 8), "amt");
   auto *div = b.CreateUDiv(x, llvm::ConstantInt::get(i64, 4), "div");
 
@@ -697,8 +697,8 @@ static void test_chain_and_feeds_udiv() {
   auto *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
   llvm::IRBuilder<> b(bb);
   llvm::Argument *x = fn->getArg(0);
-  // %masked = and i64 %x, 255       → u=[0, 255]
-  // %div    = udiv i64 %masked, 16  → u=[0, 255/16]=[0, 15]
+  // %masked = and i64 %x, 255       -> u=[0, 255]
+  // %div    = udiv i64 %masked, 16  -> u=[0, 255/16]=[0, 15]
   auto *masked = b.CreateAnd(x, llvm::ConstantInt::get(i64, 255), "masked");
   auto *div    = b.CreateUDiv(asI(masked),
                                llvm::ConstantInt::get(i64, 16), "div");
@@ -722,7 +722,7 @@ static void test_e4_and_bounds_lt_bitwidth() {
   auto *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
   llvm::IRBuilder<> b(bb);
   llvm::Argument *p0 = fn->getArg(0);
-  // %v0 = and i64 %p0, 31 — the shift amount in e4.srctgt.ll
+  // %v0 = and i64 %p0, 31 :  the shift amount in e4.srctgt.ll
   auto *v0 = b.CreateAnd(p0, llvm::ConstantInt::get(i64, 31), "v0");
 
   auto map = alive_tv_next::computeRanges({asI(v0)}, /*seed=*/{});
@@ -731,7 +731,7 @@ static void test_e4_and_bounds_lt_bitwidth() {
   CHECK(map.at(v0).u->second.ult(64));
 }
 
-// ── mixed well-definedness flag tests ─────────────────────────────────────
+// -- mixed well-definedness flag tests -------------------------------------
 
 // and(well-defined x, not-well-defined y): bounds are derived, but both flags
 // come out false because one operand is not clean.
@@ -758,7 +758,7 @@ static void test_flags_mixed_and() {
   auto map = alive_tv_next::computeRanges({asI(r)}, seed);
   // both-bounded path: u = [0, min(100, 50)] = [0, 50]
   CHECK(uEq(map, r, 0, 50));
-  // one dirty operand → result is not well-defined
+  // one dirty operand -> result is not well-defined
   CHECK(!undefFree(map, r));
   CHECK(!poisonFree(map, r));
 }
@@ -778,7 +778,7 @@ static void test_flags_mixed_add() {
   llvm::Argument *x = fn->getArg(0);
   auto *fz  = b.CreateFreeze(x, "fz");   // u=[0,10], undef_free, poison_free
   auto *add = llvm::cast<llvm::BinaryOperator>(
-      b.CreateAdd(asI(fz), x, "add"));   // lR=clean, rR=dirty → dirty result
+      b.CreateAdd(asI(fz), x, "add"));   // lR=clean, rR=dirty -> dirty result
   add->setHasNoUnsignedWrap(true);
 
   alive_tv_next::RangeMap seed;
@@ -794,7 +794,7 @@ static void test_flags_mixed_add() {
 }
 
 // select(cond_unknown, well-defined-tv, well-defined-fv): both arms are clean
-// but the condition has no known well-definedness — result is not poison-free.
+// but the condition has no known well-definedness :  result is not poison-free.
 static void test_flags_select_poison_cond() {
   begin("flags_select_poison_cond");
   llvm::LLVMContext ctx;
@@ -816,10 +816,10 @@ static void test_flags_select_poison_cond() {
   fvr.undef_free = true; fvr.poison_free = true;
   seed[tv] = tvr;
   seed[fv] = fvr;
-  // cond not seeded → condR = nullptr inside transfer()
+  // cond not seeded -> condR = nullptr inside transfer()
   auto map = alive_tv_next::computeRanges({asI(r)}, seed);
   CHECK(uEq(map, r, 0, 20));  // join: [min(0,5), max(10,20)] = [0,20]
-  // condR is nullptr → the (condR && condR->undef_free) term is false
+  // condR is nullptr -> the (condR && condR->undef_free) term is false
   CHECK(!undefFree(map, r));
   CHECK(!poisonFree(map, r));
 }
@@ -838,15 +838,15 @@ static void test_flags_contamination_chain() {
   llvm::IRBuilder<> b(bb);
   llvm::Argument *clean = fn->getArg(0), *dirty = fn->getArg(1);
 
-  // v0 = add_nuw(clean, dirty) — contaminated by dirty
+  // v0 = add_nuw(clean, dirty) :  contaminated by dirty
   auto *v0 = llvm::cast<llvm::BinaryOperator>(b.CreateAdd(clean, dirty, "v0"));
   v0->setHasNoUnsignedWrap(true);
-  // v1 = and(clean, 15) — only uses clean + ConstantInt → stays clean
+  // v1 = and(clean, 15) :  only uses clean + ConstantInt -> stays clean
   auto *v1 = b.CreateAnd(clean, llvm::ConstantInt::get(i32, 15), "v1");
-  // v2 = add_nuw(v0, v1) — v0 is contaminated → result is contaminated
+  // v2 = add_nuw(v0, v1) :  v0 is contaminated -> result is contaminated
   auto *v2 = llvm::cast<llvm::BinaryOperator>(b.CreateAdd(v0, asI(v1), "v2"));
   v2->setHasNoUnsignedWrap(true);
-  // v3 = freeze(v2) — freeze recovers well-definedness regardless
+  // v3 = freeze(v2) :  freeze recovers well-definedness regardless
   auto *v3 = b.CreateFreeze(v2, "v3");
 
   alive_tv_next::RangeMap seed;
@@ -868,15 +868,15 @@ static void test_flags_contamination_chain() {
   CHECK(uEq(map, v2, 0, 37));
   CHECK(!undefFree(map, v2));
   CHECK(!poisonFree(map, v2));
-  // v3: freeze → u=[0,37], both flags reset to true
+  // v3: freeze -> u=[0,37], both flags reset to true
   CHECK(uEq(map, v3, 0, 37));
   CHECK(undefFree(map, v3));
   CHECK(poisonFree(map, v3));
 }
 
-// ── 10-instruction chain tests ────────────────────────────────────────────
+// -- 10-instruction chain tests --------------------------------------------
 
-// Chain 1: bitmask pipeline — and/lshr/and/urem/udiv/and/add_nuw/urem/shl_nuw/or
+// Chain 1: 10-instruction bitmask pipeline.
 static void test_chain_bitmask_10() {
   begin("chain_bitmask_10");
   llvm::LLVMContext ctx;
@@ -921,8 +921,7 @@ static void test_chain_bitmask_10() {
   CHECK(uEq(map, v9, 0, 15));
 }
 
-// Chain 2: arithmetic pipeline — and/lshr/udiv/mul_nuw/add_nuw/urem/lshr/and/add_nuw/udiv
-// arg seeded u=[0,127]
+// Chain 2: 10-instruction arithmetic pipeline with seeded arg u=[0, 127].
 static void test_chain_arithmetic_10() {
   begin("chain_arithmetic_10");
   llvm::LLVMContext ctx;
@@ -970,7 +969,7 @@ static void test_chain_arithmetic_10() {
   CHECK(uEq(map, v9, 0, 4));
 }
 
-// Chain 3: signed arithmetic — add_nsw/ashr chain with two seeded signed args
+// Chain 3: signed arithmetic :  add_nsw/ashr chain with two seeded signed args
 // arg0 s=[-64,64], arg1 s=[0,32]
 static void test_chain_signed_10() {
   begin("chain_signed_10");
@@ -1183,8 +1182,8 @@ static void test_chain_zext_10() {
   CHECK(uEq(map, v9, 0, 292));
 }
 
-// Chain 7: cross-derivation s→u fires at every step
-// arg seeded s=[0,30]; all signed-nonneg ops → u always filled by crossDerive
+// Chain 7: cross-derivation s->u fires at every step
+// arg seeded s=[0,30]; all signed-nonneg ops -> u always filled by crossDerive
 static void test_chain_crossderive_10() {
   begin("chain_crossderive_10");
   llvm::LLVMContext ctx;
@@ -1252,7 +1251,7 @@ static void test_chain_or_lbound_10() {
   llvm::IRBuilder<> b(bb);
   llvm::Argument *arg0 = fn->getArg(0), *arg1 = fn->getArg(1);
 
-  // or [8,15],[4,7]: lo=max(8,4)=8, hi=getLowBitsSet(32,4)=15 → u=[8,15]
+  // or [8,15],[4,7]: lo=max(8,4)=8, hi=getLowBitsSet(32,4)=15 -> u=[8,15]
   auto *v0 = b.CreateOr(arg0, arg1, "v0");                                 // u=[8,15]
   auto *v1 = llvm::cast<llvm::BinaryOperator>(                             // u=[16,30]
       b.CreateAdd(asI(v0), arg0, "v1"));
@@ -1388,7 +1387,7 @@ static void test_chain_bitfield_10() {
   CHECK(uEq(map, v9, 0, 510));
 }
 
-// ── main ──────────────────────────────────────────────────────────────────
+// -- main ------------------------------------------------------------------
 
 int main() {
   test_and_const_rhs();

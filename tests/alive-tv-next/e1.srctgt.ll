@@ -1,14 +1,14 @@
-; Example 1 — single-instr catalog dispatch (Phase 1).
+; Example 1: single-instruction substitution.
 ;
-; Source: real corpus slice; alive-tv timed out on the whole-slice query
-; in the original run. Diff is four single-instruction rewrites:
-;   v1: sdiv exact i64 _, 8  → ashr exact i64 _, 3      (catalog L1)
-;   v3: mul nsw i64 a, b     → mul nsw i64 b, a         (catalog L3, mul-comm)
-;   v4: sdiv exact i64 _, 16 → ashr exact i64 _, 4      (catalog L2)
-;   v6: sdiv exact i64 _, 16 → ashr exact i64 _, 4      (catalog L2)
+; Instruction differences:
+;   v1: sdiv exact i64 _, 8  -> ashr exact i64 _, 3
+;   v3: mul nsw i64 a, b     -> mul nsw i64 b, a
+;   v4: sdiv exact i64 _, 16 -> ashr exact i64 _, 4
+;   v6: sdiv exact i64 _, 16 -> ashr exact i64 _, 4
 ;
-; alive-tv-next target: cuts at v1, v3, v4, v6; each dispatches to a
-; catalog rule. No assumes needed.
+; Verification:
+;   Lifted into four single-instruction TvUnit instances. Unconstrained
+;   refinement holds for all units without auxiliary assumptions.
 
 define i64 @src(i64 %p0, i64 %p1, i64 %p2, i64 %p3, i64 %p4, i64 %p5) {
 entry:

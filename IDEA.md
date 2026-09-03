@@ -1,100 +1,72 @@
-# The idea: compositional verification with an LLM oracle
+# Compositional verification with an oracle
 
-A self-contained statement of the design rationale behind the pilot at `alive-next/tv-next/`. The companion document is [`PLAN.md`](PLAN.md), which translates this into concrete phases, milestones, and a test set.
+This document specifies the design rationale for compositional translation validation in [./tv-next/](./tv-next/). Implementation phases, milestones, and test suites are specified in [./PLAN.md](./PLAN.md).
 
-## The problem
+## Problem statement
 
-Alive2 verifies LLVM optimizations by encoding a refinement check as an SMT query and dispatching it to Z3. The encoding is precise and correct; what's limited is **reach**:
+Alive2 verifies LLVM optimizations by encoding a refinement check as an SMT query and dispatching it to Z3. Three factors constrain refinement solving:
 
-- **SMT scaling cliff.** Z3 doesn't degrade gracefully with formula size — it falls off a cliff. A function with three nested `sdiv` operations and a `mul`, all on i64, is enough to push it past `--smt-to=60000`. Most "alive2 timeout" verdicts in the wild are the formula being too big, not the math being unmodeled.
+* Solver execution time scales super-linearly with formula size. Functions with nested nonlinear operations on 64-bit integers often exceed standard solver timeouts because the formula size exceeds solver capacity.
+* Whole-function query framing couples unrelated instructions into a single monolithic SMT query. Solver tractability requires isolating localized arithmetic sequences or branch paths.
+* Features outside the formal model, such as target-specific intrinsics or unsupported vector types, yield unknown verdicts rather than timeouts.
 
-- **Whole-function framing.** Alive2's natural unit is `{src, tgt}` for an entire function, but its *tractable* unit is much smaller: a few instructions of nonlinear arithmetic, a chain of variable shifts, a poison-flow path with one too many forks. The mismatch between the natural and tractable units is what produces the timeouts.
+Compositional verification addresses whole-function query framing and formula size limits by decomposing functions into smaller verification units.
 
-- **Precision gaps at the edges of the model.** Scalable vectors, target-specific intrinsics, refined LLVM trunk semantics — these are out of model entirely. They produce `unknown` rather than `timeout`. Different cause, same result: the verifier cannot decide.
+## Compositional verification framework
 
-The pilot addresses the first two directly. The third (model gaps) is out of scope for this pilot but is part of the broader Alive-Next design.
+Verification decomposes a function pair into localized units structured around pre- and postconditions:
 
-## The frame
+* The function is partitioned into difference regions whose SMT queries remain tractable.
+* Each region is verified under an entry precondition P, yielding an exit postcondition Q.
+* Units compose transitively: if refinement holds for unit A and unit B, refinement holds for their composition.
+* The function-level verdict is the logical conjunction of all unit verdicts.
 
-Treat verification as **compositional** rather than monolithic. Borrow the structure from Hoare logic / axiomatic semantics:
+Applying this framework to LLVM IR requires addressing two design requirements:
 
-- The function is decomposed into *chunks* small enough that alive2 can decide each one cheaply.
-- Each chunk is verified as a Hoare triple `{P} chunk {Q}` — entry-state precondition `P`, body `chunk`, postcondition `Q`.
-- Chunks compose: if `{P} A {Q}` and `{Q} B {R}` both verify, then `{P} A;B {R}` holds without any new SMT work.
-- The function-level verdict is the composition of all the chunk-level verdicts.
+* Region boundary selection: Cut points must align with data-flow boundaries to limit parameter interfaces.
+* Precondition synthesis: Context-dependent rewrites require preconditions over external inputs, such as value intervals, non-zero conditions, or absence of poison.
 
-Two ingredients are missing from a vanilla Hoare-style approach when applied to LLVM IR:
+## Precondition synthesis and validation
 
-1. **Where to cut.** Good cuts respect data-flow boundaries (so the resulting chunks have small interfaces) and align with semantic boundaries (so the postconditions are expressible). Picking cuts is a heuristic problem.
+Heuristic proposal mechanisms generate candidate regions and preconditions, while the SMT solver validates every proposal:
 
-2. **What to assume at cuts.** The pre / postconditions at each cut are predicates over IR variables: `%v ∈ [0, 31]`, `%p` is non-poison, `%x ≠ 0`. These are the predicates that turn an SMT-hard chunk into an SMT-easy one. Picking them is also heuristic.
+Candidate preconditions and region boundaries may be proposed by static analyses, pattern matchers, or external models.
 
-## The LLM as oracle
+All proposals are untrusted. Every candidate precondition is verified by a standalone refinement query before being injected into a unit. Unsound or unprovable proposals fail the standalone check and are discarded without affecting verification soundness. Soundness is established exclusively by the SMT solver.
 
-Both heuristic problems are exactly where LLMs are good and SMT solvers are bad. Pattern recognition, locally-true fact articulation, multi-line idiom classification — the LLM's wheelhouse.
+## Complexity and soundness requirements
 
-But LLMs cannot be trusted as the final word for a verification result. So the architecture is:
+Partitioning transforms whole-function queries into independent sub-problems:
 
-> **LLM proposes; SMT disposes.**
+* Total solver workload scales linearly with the number of units rather than exponentially with function size.
+* Local invariants suffice for most context-dependent rewrites. Bounded ranges from bitwise masks, absence of overflow from sign extension, and non-zero divisors can be derived from local backward slices.
 
-The LLM proposes cuts and assumes; alive2 verifies each cut as a refinement check and each assume as a small standalone query. The LLM's proposals are heuristic — wrong cuts and wrong assumes both get rejected by alive2 cheaply (a small SMT query refutes the wrong guess). Soundness comes entirely from the SMT side; reach is extended entirely by the LLM side.
+Soundness of composition depends on three invariants:
 
-For this pilot, the LLM is **not in the loop yet**. Cuts are derived from structural diffs between `pre.ll` and `post.ll`; assumes are hand-written by the test-set author. The pilot proves the *infrastructure* — diff, cut, verify, assume, compose — works on a curated set of examples. LLM-driven cut and assume proposers plug into the same input slots later.
+* Operand dependency consistency: Every input to a downstream unit must be identical to its pre-transformation counterpart or proven equivalent by a preceding unit.
+* Lifting fidelity: Operands defined outside the region must be lifted with types and definedness semantics matching the parent function.
+* Precondition validity: Any assumption injected into a unit must hold unconditionally under the inputs of the containing function.
 
-## Why this works
+## Target transformation classes
 
-Three reasons compositional verification is the right shape for today's LLVM:
+The test cases in [./PLAN.md](./PLAN.md) span four transformation classes of increasing structural complexity:
 
-1. **Linear cost vs cliff cost.** Total SMT cost becomes *linear* in the number of chunks, not exponential in the function size. Each chunk is small enough that Z3 stays on the easy side of the scaling cliff.
+* Single-instruction replacements: Instruction differences pair one-to-one, such as exact division by a power of two replaced with an exact arithmetic shift right, or operand commutativity.
+* Multi-instruction sequences: Consecutive differences span multiple dependent instructions, requiring multi-instruction region grouping to capture the rewrite.
+* Unequal-count sequences: Transformations alter instruction counts across source and target, such as vectorization where multiple scalar operations map to vector instructions.
+* Context-dependent rewrites: Transformations that require preconditions to hold, such as proving absence of overflow before adding nsw flags, or proving shift amounts remain within bitwidth before eliminating a freeze instruction.
 
-2. **Catalog amortization.** Most of the chunks in real LLVM optimizations are instances of a small number of *catalog rewrites*: `sdiv exact x, 2ᵏ ≡ ashr exact x, k`, mul/add commutativity, `sub-of-zext ↔ add-of-sext`, etc. Verify each catalog entry once, ahead of time; thereafter the per-chunk cost is a structural match plus a cache lookup. SMT cost approaches zero per slice once the catalog covers the corpus.
-
-3. **Local invariants suffice.** Most LLVM rewrites that look context-dependent are sound under a *locally* derivable invariant (a range from a `and`-mask, a non-poison from a `sext`, a non-zero from a dominating compare in the same BB). Once the invariant is articulated, the rewrite reduces to a catalog dispatch. The LLM's role is to spot the invariant; alive2's role is to verify it.
-
-Three reasons it doesn't trivialize the problem:
-
-- **Cuts must respect dependency chains.** Composition is sound only if every operand of `chunk B` was either identical to its pre-rewrite counterpart or proven equivalent at a prior chunk. A bug in the dependency-chain check is a soundness bug.
-
-- **Lifting fidelity matters.** Lifting a single instruction into a small `Transform` requires deciding what the operands *are* — concrete external values, possibly-poison upstream values, frozen values. Wrong lifting can prove an equivalence that doesn't actually hold in the larger function context.
-
-- **Assumes must be locally checkable.** An assume that requires global context (caller-side facts, IPO information) is out of reach. The pilot only handles assumes that are decidable from the slice's own IR.
-
-## The four sub-cases the pilot targets
-
-The test set in [`PLAN.md`](PLAN.md) is structured around four sub-cases of the compositional frame, in increasing complexity:
-
-1. **Single-instruction catalog dispatch.** The structural diff is per-line; each diff is one instance of one catalog rewrite. LLM's job (in the LLM-augmented version): recognize each diff as a catalog instance, dispatch to the pre-verified lemma. Pilot's job: structural diff + catalog match + per-cut verify.
-
-2. **Multi-instruction catalog dispatch.** Consecutive instructions change in lockstep — a single rewrite spans 2+ lines. Naive per-line diff fails to group them; the rewrite must be recognized at the *pair* (or longer) level. Catalog entries are correspondingly multi-line. Pilot's job: diff grouping + multi-line cut + multi-line catalog match.
-
-3. **Vectorization with per-lane lifting.** Pre-side and post-side have different instruction counts (e.g., 3 scalar instrs ↔ 7 vector instrs from SLP vectorization). Per-cut verification requires lifting the vector ops into per-lane scalar problems. Adds a *poison-flow assume* on unused vector-lane initialization. Pilot's job: multi-side diff + per-lane lift infrastructure + assume integration.
-
-4. **Scalar assume-needed.** A rewrite is sound only under a context-dependent precondition (a range, a non-poison, a non-zero). The pilot — given just the slice — derives the precondition itself: a hand-coded proposer (Phase 3) recognizes the rewrite shape, walks local IR to extract the supporting fact (e.g., a range from an `and`-mask, no-overflow from `sext` bounds), proposes the assume, verifies it standalone via alive2, and injects it as `llvm.assume` into the per-cut alive2 query so the rewrite verifies under the assume. Pilot's job: assume proposer + per-assume verifier + dispatch under assume.
-
-Each sub-case stresses one more LLM capability than the previous: per-line classification → multi-line pattern grouping → multi-side rewrites + structural lifting + assume articulation → context-aware invariant articulation. The pilot's infrastructure grows correspondingly.
-
-## What's in scope for the pilot
+## Scope boundaries
 
 | In scope | Out of scope |
-|----------|--------------|
-| Diff + cut + per-cut alive2 dispatch | Subprocess-driven alive-tv invocation |
-| Catalog of pre-verified rewrites | LLM that proposes catalog entries |
-| Multi-line, multi-side cuts | Multi-function / inter-procedural cuts |
-| Per-lane lifting for vector ops | Scalable-vector reasoning beyond per-lane |
-| Hand-coded assume proposers (range-from-mask, no-overflow-from-sext, …) | LLM-driven generic assume proposer |
-| Refinement check inside `IR::Function` pairs | Modifying alive2's SMT encoding or model |
+|---|---|
+| Structural diff, region lifting, and per-unit Alive2 dispatch | Subprocess-driven invocation of external tools |
+| Multi-line and asymmetric difference regions | Inter-procedural transformations |
+| Range-based and pattern-based precondition synthesis | Unchecked external preconditions |
+| Refinement verification via Alive2 C++ APIs | Modifying Alive2 SMT encoding or memory models |
 
-The pilot's input is just the slice — `pre.ll` / `post.ll` (or a single `@src` / `@tgt` file). Assumes are not part of the input; the pilot derives them itself, using a small set of hand-coded proposers in Phase 3 that cover the test set's patterns. An LLM-driven proposer is a follow-on project that plugs into the same internal proposer interface.
+Input functions are provided as paired files or single files with `@src` and `@tgt` definitions. Preconditions are synthesized from the surrounding IR rather than accepted from external user inputs. Synthesized preconditions are injected into unit modules using the `@llvm.assume(i1)` intrinsic.
 
-The IR construct used for assume injection is LLVM's standard `llvm.assume(i1)` intrinsic — `alive-tv-next` builds a per-cut `IR::Function` with `llvm.assume` calls at the relevant program points and dispatches via `TransformVerify::verify`. No custom DSL, no external assume file.
+## Reference documentation
 
-## Connecting to the plan
-
-[`PLAN.md`](PLAN.md) translates this idea into:
-
-- A test set of seven concrete examples (each exercising one of the four sub-cases above).
-- Four phases, each ending in a verification milestone for one or two test cases.
-- A file layout under `alive-next/tv-next/` (new self-contained subdirectory) that links against alive2's source-level APIs (`llvm2alive`, `Transform`, `TransformVerify::verify`, `IR::Predicate`, `smt::smt_initializer`).
-- A reuse table mapping our components to the alive2 symbols they call.
-
-The pilot is "actionable and clear" once the plan is signed off — at that point we start on M1.1 (CMake target + `main.cpp` scaffolding modeled on `tools/alive-tv.cpp`).
+Detailed test cases, component interfaces, and verification workflows are documented in [./PLAN.md](./PLAN.md).

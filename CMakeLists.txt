@@ -214,9 +214,9 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
   )
   target_compile_options(alive-exec PRIVATE -fexceptions)
 
-  # alive-next pilot — entry point parallel to alive-tv. The shared library
-  # `tv-next` (defined in tv-next/CMakeLists.txt via add_subdirectory below)
-  # holds the diff / cut / verify / compose primitives.
+  # alive-next: compositional translation validation driver.
+  # The static library tv-next defined in tv-next/CMakeLists.txt
+  # provides diffing, unit extraction, verification, and composition.
   add_llvm_executable(alive-tv-next
     "tools/alive-tv-next.cpp"
   )

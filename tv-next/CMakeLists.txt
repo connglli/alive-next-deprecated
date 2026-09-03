@@ -1,18 +1,11 @@
-# tv-next — alive-next compositional translation validator core (library).
+# tv-next: core library for compositional translation validation.
 #
-# The library exposes diff / unit / verify / compose primitives consumed by
-# the `alive-tv-next` tool (tools/alive-tv-next.cpp) and, eventually, by
-# any further alive-next-family tools (test helpers, fuzzers, etc.).
+# The library provides diffing, unit extraction, backward slicing, range
+# analysis, assume synthesis, verification dispatch, and composition
+# primitives consumed by the alive-tv-next driver in tools/alive-tv-next.cpp.
 #
-# Convention follows alive2's other library directories (`ir/`, `smt/`,
-# `llvm_util/`, etc.): a flat layout of `.h` / `.cpp` files, registered
-# with the top-level CMake via `add_subdirectory(tv-next)`. The driver
-# binary lives in `tools/` alongside `alive-tv.cpp`.
-#
-# This CMakeLists is invoked from the top-level `if (BUILD_LLVM_UTILS OR
-# BUILD_TV)` block, so LLVM headers are already on the include path.
-# Headers in this directory are referenced as `tv-next/foo.h` from any
-# consumer (the project root is on the include path).
+# Registration occurs in the root CMakeLists.txt when BUILD_LLVM_UTILS or
+# BUILD_TV is enabled. Include paths resolve relative to the repository root.
 
 set(TV_NEXT_SRCS
   ir_load.cpp

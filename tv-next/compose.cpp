@@ -33,7 +33,7 @@ ComposeResult composeVerdicts(std::vector<UnitVerdict> verdicts,
         break;
       }
       if (!v.error_message.empty())
-        err_summary << " — " << v.error_message;
+        err_summary << ": " << v.error_message;
       err_summary << "\n";
     }
   }

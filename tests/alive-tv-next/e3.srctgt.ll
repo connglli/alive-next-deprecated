@@ -1,38 +1,17 @@
-; Example 3 — vectorization with per-lane lifting + poison-flow assume
-; (Phase 4). The hardest case in the test set.
+; Example 3: asymmetric vectorization.
 ;
-; Source: real corpus slice. SLP vectorizer fuses two scalar
-; `sdiv exact _, 24` operations into a single vector `sdiv exact <2 x i64>`.
-; Pre and post sides have different instruction counts in the changed
-; region (3 scalar instrs ↔ 7 vector instrs).
+; Instruction differences:
+;   v0: sdiv exact i64 _, 8 -> ashr exact i64 _, 3
+;   v3, v4, v6: scalar operations fused into vector operations
+;     pre:  3 scalar instructions (sub, sdiv exact, sdiv exact)
+;     post: 7 vector instructions (3 inserts, vector sub, vector sdiv,
+;           2 extracts)
+;   v5: add nsw a, b -> add nsw b, a
 ;
-; Diff:
-;   v0: sdiv exact i64 _, 8   → ashr exact i64 _, 3   (catalog L1)
-;   v3,v4,v6 region: 3 scalar instrs (sub, sdiv exact, sdiv exact)
-;     → 7 vector instrs (3 inserts, vector sub, vector sdiv,
-;        2 extracts) on the post side. Multi-side rewrite.
-;   v5: add nsw a, b           → add nsw b, a         (catalog L3 add-comm)
-;
-; Per-lane lifting:
-;   Lane 0 of post's %4 = sdiv exact ((p3 - p4), 24) — equals pre's v4.
-;   Lane 1 of post's %4 = sdiv exact ((p5 - 0), 24) — equals pre's v6
-;     modulo the trivial identity sub x, 0 ≡ x.
-;
-; LLM-guessed assume:
-;   A_lane0: lane 0 of post's %2 equals %p4 (non-poison).
-;     The initial constant <i64 poison, i64 0> has poison in lane 0, but
-;     the next insertelement at index 0 overwrites it before any read.
-;     Verified standalone on the insertelement chain.
-;
-; Lemmas:
-;   L_vec: sub <N x T> a,b decomposes lane-wise; same for sdiv exact.
-;     (Structural axiom about LLVM vector arithmetic.)
-;   L_subzero: sub i64 x, 0 ≡ x. Trivial.
-;   L1, L3: as in the catalog.
-;
-; alive-tv-next target: identify the multi-side region; emit two per-lane
-; equivalence subproblems; verify A_lane0 standalone; dispatch each per-
-; lane problem via L1/L3/L_subzero.
+; Verification:
+;   v0 and v5 lift into single-instruction units.
+;   The vector region lifts into an asymmetric multi-side TvUnit verified
+;   directly through Alive2 refinement queries.
 
 define i64 @src(i64 %p0, i64 %p1, i64 %p2, i64 %p3, i64 %p4, i64 %p5) {
 entry:

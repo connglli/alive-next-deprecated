@@ -1,30 +1,25 @@
-// alive-tv-next: lightweight straight-line range analysis (Phase 5).
+// Straight-line integer range analysis and known-bits propagation.
 //
-// Single forward pass over straight-line code (no fixed-point iteration —
-// TvUnits and their parent slices are SSA DAGs with no back-edges).
+// Performs a single forward pass over an acyclic instruction sequence in
+// program order. Fixed-point iteration is omitted because instructions form a
+// DAG in SSA representation.
 //
-// KnownRange optionally carries an unsigned interval, a signed interval,
-// or both, all in the value's own bitwidth. Transfer functions select the
-// right interpretation per opcode+flags. Cross-derivation fills in the
-// complementary bound for free when it follows: if u.hi has the high bit
-// clear, s follows; if s.lo ≥ 0, u follows.
+// KnownRange stores closed unsigned intervals, closed signed intervals, and
+// known-zero and known-one bitmasks in the value's native bitwidth. Transfer
+// functions compute bounds per opcode and flag combination.
 //
-// In addition to bounds, each entry tracks whether the value is guaranteed
-// free of undef and free of poison — which are distinct in LLVM semantics:
-//   undef:  a per-use arbitrary bit-pattern (chosen independently each use).
-//   poison: a "tainted" marker that propagates through most operations and
-//           causes UB when consumed in certain ways.
-// `freeze` is the defined escape hatch for both: its output is always
-// undef-free and poison-free regardless of its input.
-// The combined `well_defined()` flag (undef_free && poison_free) means the
-// value is a concrete integer — range bounds are tight and freeze is the
-// identity.
+// When the upper bound of an unsigned interval has its most significant bit
+// clear, the signed interval matches the unsigned interval. When the lower
+// bound of a signed interval is non-negative, the unsigned interval matches the
+// signed interval.
 //
-// Coverage:
-//   ConstantInt, and, or, urem, udiv, lshr, ashr, shl (+nuw/nsw),
-//   add/sub/mul (+nuw/nsw), select, freeze, zext, sext, trunc.
+// Undef and poison status are tracked separately:
+// * undef_free: the value cannot evaluate to undef.
+// * poison_free: the value cannot evaluate to poison.
+// When both flags hold, well_defined() returns true and the freeze instruction
+// is an identity operation on the value.
 //
-// Untrusted — alive2 gates every predicate the proposers derive.
+// Alive2 independently verifies all preconditions derived from these ranges.
 
 #pragma once
 
@@ -41,39 +36,31 @@
 namespace alive_tv_next {
 
 struct KnownRange {
-  // Closed intervals in the value's bitwidth. Either or both may be absent.
-  // An entry with no bounds but with flags set (e.g. from freeze) is valid.
-  std::optional<std::pair<llvm::APInt, llvm::APInt>> u; // unsigned [lo, hi]
-  std::optional<std::pair<llvm::APInt, llvm::APInt>> s; // signed   [lo, hi]
+  // Closed intervals in the value bitwidth. Either or both may be absent.
+  std::optional<std::pair<llvm::APInt, llvm::APInt>> u; // Unsigned [lo, hi].
+  std::optional<std::pair<llvm::APInt, llvm::APInt>> s; // Signed   [lo, hi].
 
-  // Per-bit known-zero / known-one masks (LLVM's standard KnownBits). Empty
-  // (default-constructed) when nothing is known per-bit. Useful for
-  // discharging flag obligations that aren't expressible from intervals
-  // alone: `or disjoint` (no common 1-bits), `*_exact` shifts/divisions
-  // (low bits zero), alignment / non-zero / power-of-two style facts.
+  // Per-bit known-zero and known-one masks.
   std::optional<llvm::KnownBits> bits;
 
-  // Well-definedness flags. undef and poison are distinct:
-  //   undef_free:  value is definitely not undef  (but may be poison).
-  //   poison_free: value is definitely not poison (but may be undef).
+  // Well-definedness indicators.
   bool undef_free = false;
   bool poison_free = false;
 
-  // Both flags: value is a concrete integer. freeze(v) == v holds iff
-  // well_defined() is true for v.
+  // True when the value is guaranteed free of undef and poison.
   bool well_defined() const {
     return undef_free && poison_free;
   }
 };
 
-// Map from Value* to its known range. Only values with derivable information
-// (bounds or flags) appear; absent means unknown.
+// Maps values to their computed range and bit information. Absent values have
+// no inferred constraints.
 using RangeMap = std::map<const llvm::Value *, KnownRange>;
 
-// Single forward pass over `insts` (program order, no cycles).
-// Constant operands are handled lazily inside the pass.
-// `seed` pre-populates ranges for function arguments or other external values
-// (e.g. set undef_free=true for arguments under --disable-undef-input).
+// Computes range information for an instruction sequence in program order.
+//
+// Constant operands are handled during the pass. seed provides initial
+// ranges for function arguments or external values.
 RangeMap computeRanges(llvm::ArrayRef<llvm::Instruction *> insts,
                        const RangeMap &seed = {});
 

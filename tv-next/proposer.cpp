@@ -48,25 +48,18 @@ llvm::Value *findValueByName(const std::string &name, llvm::Function &fn) {
   return nullptr;
 }
 
-// ============================================================
-// Flag-obligation synthesis: turn range facts about operands into Z3-friendly
-// no-violation predicates for tgt-side flags.
-// ============================================================
+// Flag-obligation synthesis: converts operand range bounds into explicit
+// boolean predicates for flags that produce poison on violation.
 //
-// Each LLVM poison-on-violation flag (nsw/nuw/exact/nneg/...) is equivalent
-// to an explicit boolean predicate. When range analysis proves the violation
-// predicate is unsatisfiable for given operand ranges, we synthesize the
-// explicit predicate as an assume — Z3 discharges that against the flagged
-// instruction structurally instead of doing nonlinear bit-vector reasoning.
+// When operand ranges prove that a violation condition cannot occur, an
+// explicit boolean predicate is synthesized and injected as an assume.
 //
-// Currently handled flags (everything range analysis alone can prove):
-//   add/sub/mul + nsw/nuw    -> {s,u}{add,sub,mul}.with.overflow
-//   shl        + nsw/nuw    -> (a shl s) {ashr,lshr} s == a
-//   zext       + nneg       -> icmp sge a, 0
-// Flags requiring known-bits (`exact`, `disjoint`) or alloc-extent
-// (`inbounds`) are not synthesized — fit tests would always fail without
-// the extra analysis. They slot into the same dispatch when those analyses
-// land.
+// Handled flags:
+// * add/sub/mul with nsw or nuw
+// * shl with nsw or nuw
+// * zext with nneg
+// * udiv/sdiv/lshr/ashr with exact
+// * or with disjoint
 
 enum class FlagKind {
   AddNSW,
@@ -85,10 +78,8 @@ enum class FlagKind {
   OrDisjoint
 };
 
-// Look up a value's known range — from `facts` if available, otherwise the
-// natural range of its type (the same seed we feed the analyzer). Constants
-// collapse to a singleton range. For non-integer values returns an empty
-// KnownRange.
+// Resolves range bounds for an operand from facts, returning the full type
+// range for unconstrained values, or a singleton range for ConstantInt.
 template <typename FactsT>
 KnownRange rangeForOperand(llvm::Value *V, const FactsT &facts) {
   KnownRange r;
@@ -334,33 +325,31 @@ llvm::Value *buildFlagClaim(llvm::IRBuilder<> &bld, llvm::Module *M,
     return bld.CreateICmpSGE(operands[0], llvm::ConstantInt::get(ty, 0));
   }
   case FlagKind::OrDisjoint: {
-    // `a & b == 0` — no bit set in both.
+    // a & b == 0: no bit set in both operands.
     llvm::Value *anded = bld.CreateAnd(operands[0], operands[1]);
     return bld.CreateICmpEQ(anded,
                             llvm::ConstantInt::get(operands[0]->getType(), 0));
   }
   case FlagKind::LShrExact: {
-    // `(a lshr s) shl s == a` — no low bits lost.
+    // (a lshr s) shl s == a: no low bits lost.
     llvm::Value *v = bld.CreateLShr(operands[0], operands[1]);
     v = bld.CreateShl(v, operands[1]);
     return bld.CreateICmpEQ(v, operands[0]);
   }
   case FlagKind::AShrExact: {
-    // `(a ashr s) shl s == a` — same shape; ashr preserves sign so the
-    // round-trip equality only holds when the low bits were zero.
+    // (a ashr s) shl s == a: round-trip holds when low bits were zero.
     llvm::Value *v = bld.CreateAShr(operands[0], operands[1]);
     v = bld.CreateShl(v, operands[1]);
     return bld.CreateICmpEQ(v, operands[0]);
   }
   case FlagKind::UDivExact: {
-    // `(a udiv b) * b == a`.
+    // (a udiv b) * b == a.
     llvm::Value *q = bld.CreateUDiv(operands[0], operands[1]);
     llvm::Value *mul = bld.CreateMul(q, operands[1]);
     return bld.CreateICmpEQ(mul, operands[0]);
   }
   case FlagKind::SDivExact: {
-    // `(a sdiv b) * b == a`. Same round-trip; signed div makes the multiply
-    // recover a exactly iff remainder was zero.
+    // (a sdiv b) * b == a. Round-trip recovers a when remainder is zero.
     llvm::Value *q = bld.CreateSDiv(operands[0], operands[1]);
     llvm::Value *mul = bld.CreateMul(q, operands[1]);
     return bld.CreateICmpEQ(mul, operands[0]);
@@ -440,10 +429,8 @@ llvm::Instruction *findStructuralMatch(llvm::Instruction *T,
 struct FlagObligation {
   llvm::Instruction *tgt_inst; // for diagnostics; we resolve operands by key
   FlagKind kind;
-  // Operand "keys" — names of unit args or constant integer values, in src
-  // order. We use keys (not Value*) so the same obligation can be resolved
-  // both in the cloned-unit (for injection) and in the rebuilt-slice (for
-  // the standalone assume-check).
+  // Operand keys identify unit arguments or integer constants in operand
+  // order, allowing resolution in both cloned units and standalone checks.
   std::vector<OperandKey> op_keys;
 };
 
@@ -492,7 +479,7 @@ void collectAddedFlags(llvm::Instruction *T, llvm::Instruction *S,
     if (Szext && Tzext->hasNonNeg() && !Szext->hasNonNeg())
       out.push_back(FlagKind::ZExtNNeg);
   }
-  // `exact` on udiv/sdiv/lshr/ashr — PossiblyExactOperator covers all four.
+  // Flag exact on udiv, sdiv, lshr, and ashr.
   if (auto *Texact = llvm::dyn_cast<llvm::PossiblyExactOperator>(T)) {
     auto *Sexact = llvm::dyn_cast<llvm::PossiblyExactOperator>(S);
     if (Sexact && Texact->isExact() && !Sexact->isExact()) {
@@ -514,7 +501,7 @@ void collectAddedFlags(llvm::Instruction *T, llvm::Instruction *S,
       }
     }
   }
-  // `disjoint` on or — PossiblyDisjointInst.
+  // Flag disjoint on or.
   if (auto *Tdis = llvm::dyn_cast<llvm::PossiblyDisjointInst>(T)) {
     auto *Sdis = llvm::dyn_cast<llvm::PossiblyDisjointInst>(S);
     if (Sdis && Tdis->isDisjoint() && !Sdis->isDisjoint())
@@ -522,13 +509,7 @@ void collectAddedFlags(llvm::Instruction *T, llvm::Instruction *S,
   }
 }
 
-// ============================================================
-// proposeFromRanges helpers: generic range-fact assume injection
-// ============================================================
-
-// A single named value (an input to the unit, derived in parent_src) with the
-// range-analysis facts we want to inject as assumes. All fields are optional;
-// at least one must carry real information for the fact to be useful.
+// Stores range analysis facts for a unit argument derived from parent_src.
 struct KnownFact {
   std::string name;    // SSA name in both unit.src_fn (as arg) and parent_src
   BackwardSlice slice; // backward slice in parent_src needed to recheck claims
@@ -612,9 +593,9 @@ void injectFactAssumes(llvm::Function *fn, const KnownFact &fact) {
   bld.CreateCall(assume_fn, {cond});
 }
 
-// Resolve an OperandKey within a function: named keys → function arg with
-// that name; constant keys → ConstantInt of the requested type. Returns null
-// for missing named args (caller skips).
+// Resolves an OperandKey within a function: named keys map to the function
+// argument with that name; constant keys map to a ConstantInt of the expected
+// type. Returns nullptr if a named argument is missing.
 llvm::Value *resolveKeyInFn(llvm::Function *fn, const OperandKey &k,
                             llvm::Type *expected_ty) {
   if (k.is_const)
@@ -622,8 +603,7 @@ llvm::Value *resolveKeyInFn(llvm::Function *fn, const OperandKey &k,
   return findArgByName(fn, k.name);
 }
 
-// Inject a single combined assume for an obligation in `fn`'s entry block:
-// `call void @llvm.assume(claim)` where claim is the no-violation predicate.
+// Injects an assume for an obligation in fn's entry block.
 void injectObligationAssume(llvm::Function *fn, const FlagObligation &ob,
                             const std::vector<llvm::Type *> &op_tys,
                             unsigned result_bw) {
@@ -633,7 +613,7 @@ void injectObligationAssume(llvm::Function *fn, const FlagObligation &ob,
   for (size_t i = 0; i < ob.op_keys.size(); ++i) {
     llvm::Value *v = resolveKeyInFn(fn, ob.op_keys[i], op_tys[i]);
     if (!v)
-      return; // missing arg → skip this obligation in this fn
+      return; // Missing argument: skip obligation.
     operands.push_back(v);
   }
   llvm::Value *claim =
@@ -645,14 +625,13 @@ void injectObligationAssume(llvm::Function *fn, const FlagObligation &ob,
   bld.CreateCall(assume_fn, {claim});
 }
 
-// Build the standalone assume-check TvUnit for proposeFromRanges.
-// @src: rebuilds the union of all per-fact slices in parent_src plus any
-//       extra slices needed by obligation operands, and returns the
-//       conjunction of all per-fact claims AND all per-obligation claims.
-// @tgt: returns true unconditionally.
-// If the check passes, every claim holds for every input to parent_src — so
-// injecting the claims into the unit is sound (we only narrow the input
-// space, never silently strengthen tgt).
+// Standalone assume-check TvUnit for proposeFromRanges:
+// * src: constructs the slice union in parent_src for fact and obligation
+//   operands, returning the conjunction of all claims.
+// * tgt: returns true unconditionally.
+//
+// When the check passes, all claims hold for every valid input to parent_src,
+// ensuring that assume injection into the unit preserves soundness.
 TvUnit
 buildCombinedFactCheck(const std::vector<KnownFact> &facts,
                        const std::vector<FlagObligation> &obligations,
@@ -740,10 +719,8 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
       andIn(buildFactPredicate(bld, vit->second, f));
     }
 
-    // Per-obligation claims: resolve each operand against the parent (named →
-    // findValueByName → vmap; const → ConstantInt). Skip the obligation if
-    // any non-const operand can't be resolved — the standalone soundness
-    // gate would be incomplete otherwise.
+    // Resolve each obligation operand in the parent function. The obligation
+    // is skipped if any non-constant operand cannot be resolved.
     for (size_t k = 0; k < obligations.size(); ++k) {
       const FlagObligation &ob = obligations[k];
       std::vector<llvm::Value *> ops;
@@ -789,10 +766,8 @@ buildCombinedFactCheck(const std::vector<KnownFact> &facts,
 // Registered hand-coded patterns
 // ============================================================
 
-// Hand-coded shape-specific proposers run before the generic
-// `proposeFromRanges`. Append a lambda here to register one. Today this is
-// empty — every previous pattern (mul→mul nsw via sext, freeze-drop on shl)
-// is subsumed by the range-based proposer + flag-obligation synthesis.
+// Registry for shape-specific assume proposers evaluated before range-based
+// synthesis. Pattern matchers appended here return AssumedTvUnit on match.
 const std::vector<AssumeProposerFn> kPatterns = {};
 
 // ============================================================
@@ -818,10 +793,8 @@ struct PerSideFacts {
 // `unit.src_fn` structurally, but the fit-test consults this parent's range
 // info on each operand.
 //
-// Seeding: each parent argument is seeded with its type's natural range plus
-// well-defined flags (sound under --disable-undef-input — alive2 treats
-// parent args as concrete integers in their type range, so the seed is a
-// tautology the standalone assume-check trivially upholds).
+// Seeding: each parent argument is initialized with its type's natural range
+// and marked well-defined under --disable-undef-input.
 PerSideFacts collectFromParent(const TvUnit &unit, llvm::Function &parent_fn) {
   PerSideFacts out;
 
@@ -946,18 +919,15 @@ PerSideFacts collectFromParent(const TvUnit &unit, llvm::Function &parent_fn) {
   return out;
 }
 
-// Symmetric range-based proposer. Independent of cut shape (single-instr or
-// multi-instr) and independent of what the diff is (added flag, freeze
-// removal, instruction substitution, etc.).
+// Range-based assume proposer.
 //
-// We collect facts/obligations against *both* parent_src and parent_tgt
-// independently. Chain refinement (cuts 1..k-1 already verified) guarantees
-// that well-defined values at cut k agree on both sides, so any bound
-// derivable on either side is sound at the cut. The two sides often differ
-// in precision — tgt-side analysis usually sees more optimization-injected
-// info (added flags, simpler forms) and produces tighter ranges. Each side's
-// claims are discharged against its own parent via a separate standalone
-// assume-check; both must pass for the injection to be sound.
+// Collects facts and obligations from parent_src and parent_tgt independently.
+// Refinement of preceding units ensures that well-defined values agree across
+// both sides at the unit boundary, so bounds derived on either side are sound.
+//
+// Each side discharges its claims against its corresponding parent function
+// via an independent standalone assume-check. Both checks must pass before
+// injected assumptions are accepted.
 std::optional<AssumedTvUnit> proposeFromRanges(const TvUnit &unit,
                                                llvm::Function &parent_src,
                                                llvm::Function &parent_tgt,

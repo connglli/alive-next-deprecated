@@ -1,40 +1,35 @@
-# alive-tv-next reference tests
+# Alive-tv-next reference tests
 
-Curated test cases for the alive-next pilot at `alive-next/tv-next/`. Each `.srctgt.ll` here is one of the seven examples enumerated in [`../../PLAN.md`](../../PLAN.md) — the canonical test set the pilot must verify.
+Curated test cases for compositional translation validation in [../../tv-next/](../../tv-next/). Each file defines a source function `@src` and a target function `@tgt` exercising difference extraction, unit lifting, and precondition synthesis.
 
-## Mapping
+## Test mapping
 
-| File | Example | Mechanism | Phase |
-|------|---------|-----------|-------|
-| `e1.srctgt.ll` | Example 1 | single-instr catalog dispatch | Phase 1 |
-| `e1alt.srctgt.ll` | Example 1' | single-instr catalog (adds add-comm + ptrtoint identity) | Phase 1 |
-| `e2.srctgt.ll` | Example 2 | multi-instr catalog dispatch (sub-of-zext ↔ add-of-sext) | Phase 2 |
-| `varB.srctgt.ll` | Variant B | multi-instr + strength reduction + flag relaxation | Phase 2 |
-| `varA.srctgt.ll` | Variant A | flag-addition with range-from-sext assume | Phase 3 |
-| `e4.srctgt.ll` | Example 4 | scalar assume-needed (freeze drop, range-from-mask) | Phase 3 |
-| `e3.srctgt.ll` | Example 3 | vectorization with per-lane lifting + poison-flow assume | Phase 4 |
+| File | Transformation category | Verification mechanism |
+|---|---|---|
+| `e1.srctgt.ll` | Single-instruction substitution | Structural diff, single-instruction unit lifting |
+| `e1alt.srctgt.ll` | Single-instruction substitution | Add commutativity, identity cast matching |
+| `e2.srctgt.ll` | Multi-instruction sequence | Contiguous diff grouping, commutativity splitting |
+| `varB.srctgt.ll` | Multi-instruction sequence | Multi-instruction grouping, strength reduction |
+| `varA.srctgt.ll` | Context-dependent rewrite | Arithmetic extension analysis, overflow flag assume synthesis |
+| `e4.srctgt.ll` | Context-dependent rewrite | Backward slice range analysis, freeze elimination |
+| `e3.srctgt.ll` | Asymmetric transformation | Asymmetric prefix diff, multi-side vector region lifting |
 
-## Running with `alive-tv` (current state)
+## Execution with alive-tv-next
 
-These files are in alive2's standard `.srctgt.ll` format, so the existing lit infrastructure in `tests/lit.cfg.py` collects them automatically. Running `lit tests/alive-tv-next/` invokes `alive-tv` on each. Expected outcomes today, before the `alive-tv-next` binary exists:
+The test cases verify through the `alive-tv-next` driver:
 
-- **e1**, **e1alt**, **varB** — likely *correct* on alive-tv directly (catalog rewrites are individually within Z3's reach when the slice is small enough).
-- **e2** — *correct* or *unknown* (multi-instr rewrites with poison-flow can stress alive2).
-- **varA**, **e4** — likely *unknown* / *timeout*: the precondition reasoning (range-from-sext, range-from-mask) chains analyses Z3 doesn't terminate on quickly.
-- **e3** — *timeout*: vectorization + nonlinear chain on i64.
+```bash
+./build/alive-tv-next --disable-undef-input --smt-to=60000 tests/alive-tv-next/e1.srctgt.ll
+```
 
-Lit's policy treats `timeout` and `unknown` as PASS (lenient). That's fine — these tests document what alive-tv struggles on; the pilot's job is to recover them via decomposition.
+Whole-function queries on these test cases exceed SMT solver timeouts in whole-function checkers. The compositional pipeline decomposes each function into localized units verified through Alive2 refinement queries.
 
-## Running with `alive-tv-next` (target)
+## Test conventions
 
-When the pilot's binary exists, every test here should pass under `alive-tv-next` via the mechanism listed in the table. That's the pilot's exit criterion (PLAN.md, "Goal" section).
-
-## Conventions in these files
-
-- Comments at the top of each file document the example mapping, the diff, the catalog rules / lemmas / assumes used, and (where applicable) why alive-tv struggles directly.
-- Function attributes that opt added on the post-opt side (`mustprogress`, `nofree`, `norecurse`, `local_unnamed_addr`, etc.) are preserved when they appeared in the source corpus, since they're part of the realistic test material. Inferred parameter attributes that were noted in the original write-ups (`captures(address_is_null)` etc.) are kept too.
-- For each test, `@src` is the pre-opt slice and `@tgt` is the post-opt slice.
+* Each test file defines a pre-transformation function `@src` and a post-transformation function `@tgt`.
+* Header comments document instruction differences and derived preconditions.
+* Function attributes from optimization passes are preserved from the source corpus.
 
 ## Provenance
 
-Each example's source is documented in [`../../IDEA.md`](../../IDEA.md) (the design rationale) and [`../../PLAN.md`](../../PLAN.md) (the test-set table with mechanism mapping). The slices themselves were extracted from real corpus runs (E1, E1', E2, E3, VarA, VarB) or constructed pedagogically (E4).
+Test cases originate from optimization pipelines described in [../../IDEA.md](../../IDEA.md) and [../../PLAN.md](../../PLAN.md). Cases `e1`, `e1alt`, `e2`, `e3`, `varA`, and `varB` derive from compiler corpus extracts. Case `e4` is a minimal representation of freeze elimination guarded by bitmask ranges.

@@ -1,13 +1,10 @@
-// alive-tv-next — alive-next compositional translation validator.
+// alive-tv-next: compositional translation validator.
 //
-// Entry point: load a paired @src/@tgt slice, compute a per-line structural
-// diff, build a Transform for each diff group, run alive2 on each, and
-// aggregate. Modeled on tools/alive-tv.cpp (same alive2 init pattern, same
-// flag inheritance via cmd_args_list.h).
-//
-// LATER (M3+): hook in catalog matching, hand-coded assume proposers,
-// LLM-driven proposers (--model). For now the path is purely
-// diff → cut → per-cut alive2 → compose.
+// Command-line driver for compositional translation validation. The driver
+// loads paired source and target functions, partitions differences into
+// isolated regions, verifies each region via Alive2 refinement checks,
+// and composes unit verdicts. Command-line flags match alive-tv through
+// llvm_util/cmd_args_list.h.
 
 #include "tv-next/compose.h"
 #include "tv-next/diff.h"
@@ -47,13 +44,11 @@ using namespace std;
 using namespace tools;
 using namespace util;
 
-// Inherit alive-tv's full flag surface (--smt-to, --disable-undef-input,
-// --disable-poison-input, the LLVM init flags, etc.) by including the same
-// header tools/alive-tv.cpp does. Provides `alive_cmdargs` (OptionCategory),
-// `out_file` (ofstream), `out` (ostream*), `func_names`, and a long list of
-// `opt_*` cl::opts. cmd_args_def.h (included from main, after cli parse +
-// module load) wires those opts into util::config / smt:: globals and
-// initializes `out` / report-dir / output-file machinery.
+// Inherit standard Alive2 command-line options (--smt-to,
+// --disable-undef-input, --disable-poison-input, and LLVM init flags).
+// cmd_args_list.h declares alive_cmdargs, out_file, out, func_names, and opt_*
+// command-line options. cmd_args_def.h wires options into util::config and
+// smt:: solver globals.
 #define LLVM_ARGS_PREFIX ""
 #define ARGS_SRC_TGT
 #define ARGS_REFINEMENT
@@ -83,17 +78,6 @@ llvm::cl::opt<std::string>
                llvm::cl::desc("Name of tgt function (without @)"),
                llvm::cl::cat(alive_cmdargs), llvm::cl::init("tgt"));
 
-// LLM-mode (later phases). Per-invocation choice → CLI flag. API key /
-// endpoint are deployment-fixed and live in env vars
-// (ALIVE_NEXT_LLM_API_KEY, ALIVE_NEXT_LLM_BASE_URL); read lazily when the
-// LLM proposer is invoked.
-llvm::cl::opt<std::string> opt_model(
-    LLVM_ARGS_PREFIX "model",
-    llvm::cl::desc("LLM model name for cut/assume proposers (later phases). "
-                   "Without it, alive-tv-next uses only the bundled catalog "
-                   "and hand-coded proposers."),
-    llvm::cl::cat(alive_cmdargs), llvm::cl::init(""));
-
 llvm::cl::opt<bool> opt_alive_tv_next_verbose(
     LLVM_ARGS_PREFIX "tv-verbose",
     llvm::cl::desc("Print per-cut verdicts and diff summary"),
@@ -105,13 +89,12 @@ llvm::cl::opt<std::string> opt_dump_units(
                    "inspection. Developer/debug flag."),
     llvm::cl::cat(alive_cmdargs), llvm::cl::init(""));
 
-// Build an LLVM-comment block (each line prefixed with `; `) that locates
+// Build an LLVM-comment block (each line prefixed with '; ') that locates
 // the unit inside its parent @src and @tgt: every non-terminator parent
-// instruction is listed with its position index `iN`, and lines that fall
-// inside the unit's region are marked with `>`. Same text is used as the
+// instruction is listed with its position index 'iN', and lines that fall
+// inside the unit's region are marked with '>'. The same text is used as the
 // header inside dumped .ll files and as the verbose-mode preamble before
-// printing the unit itself — both let a reader see what the unit covers
-// without cross-referencing the parent.
+// printing the unit itself to identify the surrounding region context.
 std::string buildUnitContextHeader(const std::string &unit_name,
                                    size_t src_start, size_t src_size,
                                    size_t tgt_start, size_t tgt_size,
@@ -162,8 +145,8 @@ std::string buildUnitContextHeader(const std::string &unit_name,
 }
 
 // Verbose rendering: every unit (original, assume-check, modified, identical)
-// is shown as a 5-section block — heading, dashes, content, dashes,
-// right-aligned verdict — so reviewers can scan the verdict column and dive
+// is shown as a 5-section block (heading, separator, content, separator,
+// right-aligned verdict) so reviewers can scan the verdict column and dive
 // into the IR when needed.
 constexpr unsigned kVerboseWidth = 60;
 const std::string kVerboseSep(kVerboseWidth, '-');
@@ -202,11 +185,10 @@ std::string verdictText(const alive_tv_next::UnitVerdict &v) {
   return t;
 }
 
-// Render the @src/@tgt pair of `unit` in alive2's textual Transform form,
-// matching the format `tools/alive-tv` prints, with alive2's own leading
-// `----\nName: ...\n` stripped — the outer block already shows the heading
-// and separator, so duplicating them is just visual noise.
-// Returns the empty string if either side fails to lift.
+// Render the @src/@tgt pair of 'unit' in Alive2's textual Transform form,
+// matching the format tools/alive-tv prints, with the leading '----\nName: ...'
+// stripped because the outer block already renders the heading and separator.
+// Returns an empty string if either side fails to lift.
 std::string renderTransformText(const alive_tv_next::TvUnit &unit,
                                 llvm::TargetLibraryInfoWrapperPass &TLI) {
   auto fn_src = llvm_util::llvm2alive(*unit.src_fn, TLI.getTLI(*unit.src_fn),
@@ -259,9 +241,8 @@ void printVerboseBlock(std::ostream &os, const std::string &heading,
 
 } // namespace
 
-// Required by cmd_args_def.h's `cache = make_unique<Cache>(...)` branch.
-// Even with NO_REDIS_SUPPORT the symbol is referenced (the -cache opt
-// path errors out at runtime), so it must be in scope.
+// Required by cmd_args_def.h cache initialization branch. The symbol is
+// referenced even when Redis support is disabled, so it must be in scope.
 unique_ptr<Cache> cache;
 
 int main(int argc, char **argv) {
@@ -271,7 +252,7 @@ int main(int argc, char **argv) {
   llvm::LLVMContext Context;
 
   std::string usage =
-      "alive-tv-next — alive-next compositional translation validator\n"
+      "alive-tv-next: compositional translation validator\n"
       "version: ";
   usage += util::alive_version;
   usage += R"EOF(
@@ -280,47 +261,40 @@ Usage:
   alive-tv-next [alive-tv flags...] pre.ll [post.ll]
   alive-tv-next [alive-tv flags...] combined.srctgt.ll
 
-Input is a raw slice (@src and @tgt), either as two files or one file
-containing both functions. Assumes (when needed for Phase 3+ rewrites)
-are derived internally and injected as `llvm.assume` into per-cut alive2
-queries.
-
-The catalog of pre-verified rewrites is bundled with the binary; no
-user-facing catalog flag.
-
-LLM fallback (later phases) is opt-in via --model; auth via
-ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
+Input is a function pair (@src and @tgt), either as two files or one file
+containing both functions. Preconditions required for rewrites are derived
+and validated prior to assumption injection.
 )EOF";
 
   llvm::cl::HideUnrelatedOptions(alive_cmdargs);
   llvm::cl::ParseCommandLineOptions(argc, argv, usage);
 
-  // Load the slice.
+  // Load input functions.
   auto loaded = alive_tv_next::loadSrcTgt(opt_file1, opt_file2, opt_src_fn,
                                           opt_tgt_fn, Context);
   if (!loaded) {
     return 1;
   }
 
-  // Wire alive-tv's command-line options into util::config / smt:: globals
-  // and set up `out` / report-dir / output-file machinery. Same pattern as
-  // tools/alive-tv.cpp (line 126-127). Must come after CLI parse + module
-  // load and before any code that consults config:: or *out.
+  // Wire command-line options into util::config and smt:: globals, and
+  // configure output streams and report directories. Must execute after CLI
+  // parsing and module loading, before code consults config or out.
 #define ARGS_MODULE_VAR loaded->module1
 #include "llvm_util/cmd_args_def.h"
 
-  // Initialize alive2 globals once with the input module's data layout.
+  // Initialize Alive2 globals once with the input module's data layout.
   auto &DL = loaded->module1->getDataLayout();
   llvm::Triple targetTriple(loaded->module1->getTargetTriple());
   llvm::TargetLibraryInfoWrapperPass TLI(targetTriple);
   llvm_util::initializer llvm_util_init(*out, DL);
   smt::smt_initializer smt_init;
 
-  // Compute the diff. Diff positions are grouped into runs of consecutive
-  // diffs (Phase 2): each run is lifted as one TvUnit.
+  // Compute difference regions. Contiguous differing positions are grouped
+  // and lifted into standalone TvUnit instances.
   auto diff =
       alive_tv_next::computeDiffRegions(*loaded->src_fn, *loaded->tgt_fn);
   if (!diff) {
+    *out << "alive-tv-next: could not compute difference regions\n";
     return 1;
   }
   if (opt_alive_tv_next_verbose) {
@@ -344,8 +318,7 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
   verdicts.reserve(diff->regions.size());
 
   // Collect parent non-terminators in order. Used for verbose rendering of
-  // identical positions, which share src/tgt content by definition (Phase 1
-  // assumption: equal-length BBs).
+  // identical positions that share source and target content.
   auto collectInsts = [](llvm::Function &fn) {
     std::vector<llvm::Instruction *> v;
     for (auto &bb : fn)
@@ -356,10 +329,11 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
   };
   std::vector<llvm::Instruction *> src_insts = collectInsts(*loaded->src_fn);
 
-  // Unit numbering covers every position — identical and diff — so reviewers
-  // can match `unit@N` against the parent's instruction stream. The progress
-  // callback uses `current_context_header` (rebound per region) so derivative
-  // units (assume-check, range-assume) re-use their parent unit's context.
+  // Unit numbering covers every position (both identical and differing) so
+  // reviewers can match 'unit@N' against the parent instruction stream.
+  // The progress callback uses 'current_context_header' (rebound per region)
+  // so derivative units (assume-check, range-assume) reuse their parent unit's
+  // context.
   size_t unit_counter = 0;
   size_t next_src_pos = 0;
   std::string current_context_header;
@@ -392,9 +366,9 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
       };
 
   for (const alive_tv_next::DiffRegion &region : diff->regions) {
-    // Unify symmetric / asymmetric region indexing into one (start, size)
+    // Unify symmetric and asymmetric region indexing into one (start, size)
     // pair per side. The textual src/tgt position range only appears in
-    // the per-unit comment header — the unit name itself is just a number.
+    // the per-unit comment header: the unit name itself is just an index.
     size_t src_start, src_size, tgt_start, tgt_size;
     if (region.is_asymmetric) {
       src_start = region.src_start_idx;
@@ -406,7 +380,7 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
       src_size = tgt_size = region.positions.size();
     }
 
-    // Emit any identical positions sitting before this region.
+    // Emit identical positions preceding this region.
     flushIdentical(src_start);
     next_src_pos = src_start + src_size;
 
@@ -416,7 +390,7 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
     auto unit = alive_tv_next::buildTvUnit(region, *loaded->module1, Context,
                                            diag_name);
     if (!unit) {
-      // Build failure: surface as a failed verdict so the slice fails cleanly.
+      // Build failure: surface as a failed verdict so verification fails.
       alive_tv_next::UnitVerdict v;
       v.name = diag_name;
       v.passed = false;
@@ -439,10 +413,10 @@ ALIVE_NEXT_LLM_API_KEY env var, endpoint via ALIVE_NEXT_LLM_BASE_URL.
     verdicts.push_back(std::move(verdict));
   }
 
-  // Trailing identical positions after the last region.
+  // Emit identical positions following the last region.
   flushIdentical(src_insts.size());
 
-  // Aggregate.
+  // Aggregate unit verdicts.
   auto result = alive_tv_next::composeVerdicts(std::move(verdicts),
                                                diff->identical_count);
 

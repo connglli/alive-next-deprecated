@@ -65,9 +65,7 @@ UnitVerdict runOnce(TvUnit &unit, llvm::TargetLibraryInfoWrapperPass &tli,
   t.src = std::move(*fn_src);
   t.tgt = std::move(*fn_tgt);
 
-  // Fast path: alive2's own syntactic-equivalence check on the lifted form.
-  // For Phase 1 cuts this is unlikely to fire (we only build cuts at diff
-  // positions), but harmless.
+  // Fast path: syntactic-equivalence check on the translated IR.
   {
     std::stringstream ss1, ss2;
     t.src.print(ss1);
@@ -125,22 +123,20 @@ UnitVerdict verifyTvUnit(TvUnit &unit, llvm::TargetLibraryInfoWrapperPass &tli,
     progress(unit, v);
 
   if (v.passed)
-    return v; // Universally correct units
+    return v;
   if (v.status != UnitVerdict::Status::Unsound &&
       v.status != UnitVerdict::Status::FailedToProve)
-    return v; // Erroneous units
+    return v;
   if (!parent_src || !parent_tgt)
     return v;
 
-  // Unsound and FailedProve cases may need preconditions to make them hold.
-  // Try the hand-coded proposers.
+  // Consult proposers when unconstrained verification fails.
   auto proposed =
       proposeAssume(unit, *parent_src, *parent_tgt, unit.module->getContext());
   if (!proposed)
     return v;
 
-  // Standalone soundness gate: every precondition (potentially split across
-  // src-anchored and tgt-anchored checks) must hold unconditionally.
+  // Verify all candidate preconditions unconditionally before relying on them.
   for (auto &ac : proposed->assume_checks) {
     UnitVerdict check_v = runOnce(ac, tli, smt_init);
     dumpTvUnit(ac, dump_dir, context_header);
@@ -154,7 +150,7 @@ UnitVerdict verifyTvUnit(TvUnit &unit, llvm::TargetLibraryInfoWrapperPass &tli,
     }
   }
 
-  // Re-verify the unit with `llvm.assume` injected.
+  // Re-verify the unit with llvm.assume injected.
   UnitVerdict mod_v = runOnce(proposed->modified_unit, tli, smt_init);
   dumpTvUnit(proposed->modified_unit, dump_dir, context_header);
   if (progress)

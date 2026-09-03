@@ -1,21 +1,13 @@
-; Example 4 — purely scalar assume-needed: freeze drop with
-; range-from-mask assume (Phase 3).
+; Example 4: freeze elimination with range precondition.
 ;
-; Source: synthetic. Pedagogical illustration; the rewrite *family* (drop
-; freeze whenever the operand is provably non-poison, often via an and-
-; derived range) is common in real LLVM output (InstSimplify).
+; Instruction differences:
+;   v2: freeze instruction eliminated; v3 reads v1 directly.
 ;
-; Diff: single change — v2 = freeze v1 removed, v3 reads v1 directly.
-;
-; What alive-tv-next must derive (internally, not part of this input):
-;   The freeze-drop catalog rule has a precondition "operand is non-poison."
-;   v1 = shl i64 %p1, %v0 is non-poison iff %v0 < 64 (i64 bitwidth).
-;   The fact %v0 < 64 is locally derivable from %v0 = and i64 %p0, 31
-;   (which forces %v0 ∈ [0, 31]).
-;
-;   alive-tv-next (Phase 3+) proposes the assume `icmp ult i64 %v0, 64`,
-;   verifies it standalone, then injects `llvm.assume` into the per-cut
-;   alive2 query so the freeze drop verifies cleanly.
+; Precondition synthesis:
+;   shl i64 %p1, %v0 is poison-free when %v0 < 64.
+;   Static range analysis over %v0 = and i64 %p0, 31 establishes %v0 in [0, 31].
+;   The synthesized predicate icmp ult i64 %v0, 64 is verified through a
+;   standalone check before injection into the re-verified unit.
 
 define i64 @src(i64 %p0, i64 %p1, i64 %p2) {
 entry:

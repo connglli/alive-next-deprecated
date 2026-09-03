@@ -14,16 +14,11 @@ namespace alive_tv_next {
 
 namespace {
 
-// A "commutativity-shaped" rewrite has the same opcode, the same operand
-// multiset (by SSA-name / constant text), and the same result name on
-// both sides. Concretely: a binary op whose operands are swapped, leaving
-// the produced value unchanged. Splitting such positions out of a group
-// keeps the per-cut SMT query small — they don't depend on neighboring
-// rewrites' value-changes — and avoids over-grouping that pushes alive2
-// over its scaling cliff.
+// Detects binary operations where operands are swapped while preserving the
+// opcode, operand multiset, and result name. Isolating commutativity rewrites
+// into separate regions limits SMT formula size in downstream verification.
 //
-// We're conservative: only binary ops with 2 operands (skip GEPs and
-// other multi-operand cases where commutativity isn't well-defined).
+// Restricted to binary operators with exactly two operands.
 bool isLikelyCommutativity(const llvm::Instruction *src,
                            const llvm::Instruction *tgt) {
   if (src->getOpcode() != tgt->getOpcode())
@@ -31,10 +26,8 @@ bool isLikelyCommutativity(const llvm::Instruction *src,
   if (src->getNumOperands() != 2 || tgt->getNumOperands() != 2)
     return false;
 
-  // Same result name on both sides — splits things like Example 2's
-  // mul-comm at position 5 (`%v5` on both sides), but keeps positions
-  // where the result was renamed (e.g., `%v3` vs `%v3.neg`) attached to
-  // their group.
+  // Only split when result names match. If a result was renamed, retain the
+  // instruction in its current group.
   if (src->getName() != tgt->getName())
     return false;
 
@@ -86,7 +79,7 @@ std::string instAsText(const llvm::Instruction &I) {
 std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
                                              llvm::Function &tgt) {
   if (src.size() != 1 || tgt.size() != 1) {
-    llvm::errs() << "alive-tv-next: Phase 1 requires single-BB functions; "
+    llvm::errs() << "alive-tv-next: requires single-BB functions; "
                  << "@" << src.getName() << " has " << src.size() << " BBs, "
                  << "@" << tgt.getName() << " has " << tgt.size() << " BBs\n";
     return std::nullopt;
@@ -107,7 +100,7 @@ std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
   DiffResult result;
 
   if (src_insts.size() == tgt_insts.size()) {
-    // ── Equal-count path (Phase 1/2): position-by-position pairing ──────────
+    // Position-by-position pairing for matching instruction counts.
     DiffRegion current;
     auto flush_group = [&]() {
       if (!current.positions.empty()) {
@@ -123,10 +116,7 @@ std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
         continue;
       }
 
-      // Commutativity-shaped diffs get their own group: they don't depend
-      // on neighboring rewrites' value-changes (the result is the same value
-      // by commutativity), so isolating them keeps the joint cut's SMT
-      // query small.
+      // Isolate commutativity rewrites into single-instruction regions.
       if (isLikelyCommutativity(src_insts[i], tgt_insts[i])) {
         flush_group();
         current.positions.push_back(
@@ -140,16 +130,14 @@ std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
     flush_group();
 
   } else {
-    // ── Asymmetric path (Phase 4): unequal instruction counts ───────────────
+    // Pairing and tail aggregation for mismatched instruction counts.
     //
     // Walk src and tgt in lockstep while pairs are structurally aligned:
-    //   (a) Textually identical → counted as an identical position.
-    //   (b) Both named with the same SSA name → treat as a paired diff at
-    //       the same semantic position; emit as a standard DiffRegion with
-    //       commutativity-splitting applied as usual.
-    // The first pair that breaks both conditions starts the asymmetric
-    // region: all remaining instructions on each side are gathered into one
-    // asymmetric DiffRegion.
+    // * Textually identical pairs increment identical_count.
+    // * Pairs sharing the same non-empty SSA name are grouped into a symmetric
+    //   region, with commutativity splitting applied.
+    // The first pair breaking both conditions begins an asymmetric region
+    // containing all remaining instructions on both sides.
     DiffRegion paired_current;
     auto flush_paired = [&]() {
       if (!paired_current.positions.empty()) {
@@ -169,7 +157,7 @@ std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
         continue;
       }
 
-      // Same non-empty SSA result name → semantically paired diff position.
+      // Semantic pairing by identical SSA result name.
       if (s->hasName() && t->hasName() && s->getName() == t->getName()) {
         if (isLikelyCommutativity(s, t)) {
           flush_paired();
@@ -200,8 +188,8 @@ std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
     }
   }
 
-  // Terminators must match. We don't cut over them, but a disagreement
-  // would be a soundness issue worth surfacing.
+  // Terminators must match. Disagreement indicates differing control-flow
+  // exits and prevents verification.
   llvm::Instruction *src_term = src_bb.getTerminator();
   llvm::Instruction *tgt_term = tgt_bb.getTerminator();
   if (src_term && tgt_term && instAsText(*src_term) != instAsText(*tgt_term)) {

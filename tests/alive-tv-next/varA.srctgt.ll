@@ -1,23 +1,15 @@
-; Variant A — flag-addition with no-overflow assume (Phase 3).
+; Variant A: multiplication flag addition with overflow precondition.
 ;
-; Source: real corpus slice. The interesting bit at v2:
-;   pre:  mul i64 v0, v1            (no flag, full wraparound, never poison)
-;   post: mul nsw i64 v1, v0        (operand swap + nsw added)
+; Instruction differences:
+;   v2: mul i64 v0, v1 -> mul nsw i64 v1, v0
 ;
-; Adding nsw is normally MORE poison (post poison on overflow; pre is
-; wraparound), which is the wrong direction for refinement — sound only
-; when the multiplication provably never signed-overflows.
-;
-; What alive-tv-next must derive (internally, not part of this input):
-;   The mul-nsw-add catalog rule has a precondition "no signed overflow."
-;   Both v0 and v1 are sext from i32, so each is in [-2^31, 2^31-1]; their
-;   product is bounded by 2^62, well inside i64 — overflow is impossible.
-;
-;   alive-tv-next (Phase 3+) proposes the assume "v0 * v1 does not signed-
-;   overflow" (e.g., via `llvm.smul.with.overflow.i64` + extracted
-;   overflow bit), verifies it standalone using the sext-derived range
-;   bounds, then injects `llvm.assume` into the per-cut alive2 query so
-;   the nsw addition verifies cleanly.
+; Precondition synthesis:
+;   Adding nsw introduces poison on signed overflow.
+;   Operands v0 and v1 trace to sext from i32, bounding each operand in
+;   [-2^31, 2^31 - 1]. The product is bounded in magnitude by 2^62 and cannot
+;   overflow i64.
+;   The synthesized llvm.smul.with.overflow predicate is verified through a
+;   standalone check before injection into the re-verified unit.
 
 define ptr @src(i32 %p0, i32 %p1, i64 %p2, ptr %p3) {
 entry:

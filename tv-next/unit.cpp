@@ -143,10 +143,9 @@ buildHalf(const std::vector<llvm::Instruction *> &insts, llvm::Function *fn,
   return exit;
 }
 
-// Build a TvUnit from an asymmetric DiffRegion. The src_region and
-// tgt_region may have different lengths. External operands are unioned by
-// SSA name across both sides; the TvUnit exits at the last instruction on
-// each side (which must share a type).
+// Constructs a TvUnit from an asymmetric DiffRegion. External operands are
+// unioned across both sides by SSA name. The TvUnit exits at the last
+// instruction of each region, which must share identical types.
 std::optional<TvUnit> buildAsymTvUnit(const DiffRegion &region,
                                       llvm::Module &parent_module,
                                       llvm::LLVMContext &ctx,
@@ -156,20 +155,20 @@ std::optional<TvUnit> buildAsymTvUnit(const DiffRegion &region,
 
   if (src_insts.empty() || tgt_insts.empty()) {
     llvm::errs() << "alive-tv-next: " << diag_name
-                 << " — asymmetric region has empty src or tgt\n";
+                 << ": asymmetric region has empty src or tgt\n";
     return std::nullopt;
   }
   for (auto *I : src_insts) {
     if (I->isTerminator()) {
       llvm::errs() << "alive-tv-next: " << diag_name
-                   << " — cannot lift a terminator in src region\n";
+                   << ": cannot lift a terminator in src region\n";
       return std::nullopt;
     }
   }
   for (auto *I : tgt_insts) {
     if (I->isTerminator()) {
       llvm::errs() << "alive-tv-next: " << diag_name
-                   << " — cannot lift a terminator in tgt region\n";
+                   << ": cannot lift a terminator in tgt region\n";
       return std::nullopt;
     }
   }
@@ -177,12 +176,12 @@ std::optional<TvUnit> buildAsymTvUnit(const DiffRegion &region,
   llvm::Type *result_ty = src_insts.back()->getType();
   if (result_ty->isVoidTy()) {
     llvm::errs() << "alive-tv-next: " << diag_name
-                 << " — src region exit has void result type\n";
+                 << ": src region exit has void result type\n";
     return std::nullopt;
   }
   if (tgt_insts.back()->getType() != result_ty) {
     llvm::errs() << "alive-tv-next: " << diag_name
-                 << " — src and tgt region exit types differ\n";
+                 << ": src and tgt region exit types differ\n";
     return std::nullopt;
   }
 
@@ -244,7 +243,7 @@ std::optional<TvUnit> buildTvUnit(const DiffRegion &region,
     return buildAsymTvUnit(region, parent_module, ctx, diag_name);
 
   if (region.positions.empty()) {
-    llvm::errs() << "alive-tv-next: " << diag_name << " — empty region\n";
+    llvm::errs() << "alive-tv-next: " << diag_name << ": empty region\n";
     return std::nullopt;
   }
 
@@ -256,12 +255,12 @@ std::optional<TvUnit> buildTvUnit(const DiffRegion &region,
   for (const auto &dp : region.positions) {
     if (dp.src_inst->isTerminator() || dp.tgt_inst->isTerminator()) {
       llvm::errs() << "alive-tv-next: " << diag_name
-                   << " — cannot lift a terminator\n";
+                   << ": cannot lift a terminator\n";
       return std::nullopt;
     }
     if (dp.src_inst->getType() != dp.tgt_inst->getType()) {
       llvm::errs() << "alive-tv-next: " << diag_name
-                   << " — src and tgt types differ at position " << dp.inst_idx
+                   << ": src and tgt types differ at position " << dp.inst_idx
                    << "\n";
       return std::nullopt;
     }
@@ -269,16 +268,15 @@ std::optional<TvUnit> buildTvUnit(const DiffRegion &region,
     tgt_insts.push_back(dp.tgt_inst);
   }
 
-  // The region's exit value (last position) determines the TvUnit's return
-  // type.
+  // The region exit value (last position) determines the TvUnit return type.
   llvm::Type *result_ty = src_insts.back()->getType();
   if (result_ty->isVoidTy()) {
     llvm::errs() << "alive-tv-next: " << diag_name
-                 << " — exit instruction has void result type\n";
+                 << ": exit instruction has void result type\n";
     return std::nullopt;
   }
 
-  // Internal sets: instructions defined *within* the region on each side.
+  // Internal sets: instructions defined within the region on each side.
   std::set<llvm::Instruction *> src_internal(src_insts.begin(),
                                              src_insts.end());
   std::set<llvm::Instruction *> tgt_internal(tgt_insts.begin(),
@@ -314,7 +312,7 @@ std::optional<TvUnit> buildTvUnit(const DiffRegion &region,
   unit.tgt_fn = llvm::Function::Create(fn_ty, llvm::Function::ExternalLinkage,
                                        "tgt", unit.module.get());
 
-  // Name parameters and build per-side name → Argument lookup tables.
+  // Name parameters and build per-side name to Argument lookup tables.
   std::map<std::string, llvm::Argument *> src_name_to_param, tgt_name_to_param;
   for (size_t i = 0; i < unioned->size(); ++i) {
     unit.src_fn->getArg(i)->setName((*unioned)[i].first);

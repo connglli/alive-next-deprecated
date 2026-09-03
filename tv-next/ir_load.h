@@ -1,11 +1,11 @@
-// alive-tv-next: load a paired @src/@tgt slice from one or two LLVM IR files.
+// Loads paired functions for translation validation from one or two LLVM files.
 //
-// Supports both alive-tv input forms:
-//   - One file containing @src and @tgt functions (single-file form).
-//   - Two files: file1 contains @src, file2 contains @tgt (paired form).
+// Supported input forms:
+// * Single-file form: file1 contains both functions; file2 is empty.
+// * Paired-file form: file1 contains src_fn_name; file2 contains tgt_fn_name.
 //
-// Wraps llvm_util::openInputFile + llvm_util::findFunction; verifies the
-// modules with llvm::verifyModule before returning. Diagnostics on errs().
+// Verification of modules is performed with llvm::verifyModule. Diagnostics
+// are written to llvm::errs().
 
 #pragma once
 
@@ -19,10 +19,11 @@
 
 namespace alive_tv_next {
 
-// A loaded @src/@tgt pair. `module1` always owns the IR backing `src_fn`;
-// `module2` is non-null only in the paired-file form, in which case it owns
-// `tgt_fn`. In single-file form, `module2` is null and both functions live
-// in `module1`.
+// Paired functions and their owning modules.
+//
+// module1 owns the IR for src_fn. When file2 is provided, module2 owns the IR
+// for tgt_fn. When file2 is empty, module2 is null and module1 owns both
+// functions.
 struct LoadedSrcTgt {
   std::unique_ptr<llvm::Module> module1;
   std::unique_ptr<llvm::Module> module2; // null = single-file form
@@ -30,12 +31,14 @@ struct LoadedSrcTgt {
   llvm::Function *tgt_fn = nullptr;
 };
 
-// Load a paired @src/@tgt input. `file2` may be empty for the single-file
-// form. `src_fn_name` / `tgt_fn_name` default to "src" / "tgt" at the call
-// site.
+// Loads modules from disk, validates IR with llvm::verifyModule, and resolves
+// the requested functions. file2 is empty for single-file form.
 //
-// Returns std::nullopt and prints a diagnostic to errs() on parse,
-// verifyModule, or function-lookup failure.
+// Returns std::nullopt and writes a diagnostic to llvm::errs() when:
+// * File reading or IR parsing fails.
+// * llvm::verifyModule reports validation errors.
+// * Either requested function name cannot be found.
+// * src_fn and tgt_fn have differing function signatures.
 std::optional<LoadedSrcTgt> loadSrcTgt(const std::string &file1,
                                        const std::string &file2,
                                        const std::string &src_fn_name,

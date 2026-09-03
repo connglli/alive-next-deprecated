@@ -1,22 +1,7 @@
-// alive-tv-next: composition checker.
+// Aggregates per-unit verification verdicts into a slice-level verdict.
 //
-// Aggregates per-unit verdicts into a slice-level verdict. Refinement is
-// transitive in principle, so the slice verifies whenever every unit
-// verifies — provided three load-bearing checks the composer enforces:
-//
-//   1. Operand-chain consistency: every unit's verification was done over
-//      the actual @tgt SSA wiring at that program point.
-//   2. Assume-scoping: assumes verified at one unit propagate correctly to
-//      units that depend on the assumed values (Phase 3+).
-//   3. Identity-position strict match: positions classified as "unchanged"
-//      match textually + structurally, not just by opcode.
-//
-// Phase 1 (M1.3) implements:
-//   - per-unit verdict aggregation (this file)
-//   - identity-position strict match (handled in diff.cpp via textual diff)
-//
-// Operand-chain consistency and assume-scoping land in later phases as
-// the corresponding mechanisms come online.
+// Refinement holds for the composite function when every unit verification
+// succeeds and unchanged positions match identically.
 
 #pragma once
 
@@ -27,15 +12,19 @@
 
 namespace alive_tv_next {
 
+// Composite verification result.
 struct ComposeResult {
-  bool passed = false;
-  size_t identical_positions = 0;
-  std::vector<UnitVerdict> verdicts;
-  std::string error_message;
+  bool passed = false;               // True when all units passed.
+  size_t identical_positions = 0;    // Count of identical instruction pairs.
+  std::vector<UnitVerdict> verdicts; // Individual unit outcomes.
+  std::string error_message;         // Formatted diagnostics on failure.
 };
 
-// Phase 1 composer: requires every unit in `verdicts` to have passed.
-// `identical_positions` is informational (carried from DiffResult).
+// Aggregates unit verdicts into a ComposeResult.
+//
+// Sets passed to true if and only if every verdict in verdicts has passed.
+// When any unit fails, error_message contains a summary of failing unit
+// statuses and diagnostic messages.
 ComposeResult composeVerdicts(std::vector<UnitVerdict> verdicts,
                               size_t identical_positions);
 

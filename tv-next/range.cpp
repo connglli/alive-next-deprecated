@@ -10,7 +10,7 @@ namespace alive_tv_next {
 
 namespace {
 
-// Fill in the complementary bound when it follows for free.
+// Derives complementary signed or unsigned bounds when the sign is known.
 void crossDerive(KnownRange &r) {
   if (r.u && !r.s && !r.u->second.isNegative())
     r.s = r.u;
@@ -18,9 +18,8 @@ void crossDerive(KnownRange &r) {
     r.u = r.s;
 }
 
-// Look up the KnownBits for V — from the map if known, else fall back to a
-// constant if V is a ConstantInt, else "all unknown" at the value's width.
-// "All unknown" is the analytical neutral element: it adds no information.
+// Retrieves KnownBits for V from map, evaluates constant values directly, or
+// returns an unconstrained bitmask at the value bitwidth.
 llvm::KnownBits knownBitsOf(const llvm::Value *V, const RangeMap &map) {
   if (auto *CI = llvm::dyn_cast<llvm::ConstantInt>(V))
     return llvm::KnownBits::makeConstant(CI->getValue());
@@ -32,9 +31,7 @@ llvm::KnownBits knownBitsOf(const llvm::Value *V, const RangeMap &map) {
   return llvm::KnownBits(bw);
 }
 
-// Tighten r.bits from u/s intervals via LLVM's KnownBits::makeConstantRange.
-// E.g. an unsigned range of [0, 31] forces high bits zero. We intersect (=
-// conjoin facts) so every source's known bits contribute.
+// Tightens r.bits using interval bounds via KnownBits::makeConstantRange.
 void deriveBitsFromIntervals(KnownRange &r, unsigned bw) {
   if (bw == 0)
     return;
@@ -50,11 +47,8 @@ void deriveBitsFromIntervals(KnownRange &r, unsigned bw) {
     add(cr.toKnownBits());
   }
   if (r.s && r.s->first.sle(r.s->second)) {
-    // ConstantRange has no signed flavor; the unsigned interval over the
-    // wraparound case approximates well enough — the toKnownBits() method
-    // returns common bits regardless of which interpretation we use, so
-    // forming a "signed-style" range as just [lo, hi) on the i64 ring still
-    // yields any high-bit agreement that survives.
+    // Approximate signed bits using an unsigned interval. toKnownBits returns
+    // common bits shared across the interval.
     llvm::APInt lo = r.s->first, hi = r.s->second + 1;
     if (lo.ule(hi)) {
       llvm::ConstantRange cr(lo, hi);
@@ -65,9 +59,8 @@ void deriveBitsFromIntervals(KnownRange &r, unsigned bw) {
     r.bits = acc;
 }
 
-// Look up V in the map; if not found and V is a ConstantInt, synthesize a
-// KnownRange for it (constants are always well-defined). Returns nullptr when
-// V has no derivable information.
+// Resolves range for V, synthesizing a well-defined range for ConstantInt
+// values. Returns nullptr when V has no known range information.
 const KnownRange *rangeOf(const llvm::Value *V, const RangeMap &map,
                           KnownRange &storage) {
   auto it = map.find(V);
@@ -85,7 +78,7 @@ const KnownRange *rangeOf(const llvm::Value *V, const RangeMap &map,
   return nullptr;
 }
 
-// Helper: check whether a shift amount operand is provably < bitwidth.
+// Tests whether a shift amount operand is strictly less than the bitwidth.
 // Returns {in_range, const_shift} where const_shift is bw when non-constant.
 std::pair<bool, unsigned> shiftInRange(llvm::Value *amt_op, unsigned bw,
                                        const KnownRange *rR) {
@@ -106,7 +99,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
 
   KnownRange lhsS, rhsS, srcS, condS;
 
-  // ── select ─────────────────────────────────────────────────────────────────
+  // select
   if (auto *sel = llvm::dyn_cast<llvm::SelectInst>(I)) {
     const KnownRange *condR = rangeOf(sel->getCondition(), map, condS);
     const KnownRange *trueR = rangeOf(sel->getTrueValue(), map, lhsS);
@@ -129,10 +122,8 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
                                                         : falseR->s->second;
       r.s = {lo, hi};
     }
-    // KnownBits: result is either trueValue or falseValue, so a bit is known
-    // only if both branches agree on it. LLVM's `intersectWith` returns
-    // KnownBits whose Zero/One are the bitwise AND of the inputs' — exactly
-    // this "agree on both branches" semantic, despite the confusing name.
+    // A bit is known only when both branches agree. intersectWith computes
+    // the bitwise intersection of known bits across branches.
     {
       llvm::KnownBits tb = knownBitsOf(sel->getTrueValue(), map);
       llvm::KnownBits fb = knownBitsOf(sel->getFalseValue(), map);
@@ -152,7 +143,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     return r;
   }
 
-  // ── freeze ─────────────────────────────────────────────────────────────────
+  // freeze
   if (auto *fz = llvm::dyn_cast<llvm::FreezeInst>(I)) {
     const KnownRange *srcR = rangeOf(fz->getOperand(0), map, srcS);
     KnownRange r;
@@ -168,7 +159,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     return r;
   }
 
-  // ── binary operators ───────────────────────────────────────────────────────
+  // binary operators
   if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(I)) {
     const KnownRange *lR = rangeOf(BO->getOperand(0), map, lhsS);
     const KnownRange *rR = rangeOf(BO->getOperand(1), map, rhsS);
@@ -177,8 +168,8 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
 
     case llvm::Instruction::And: {
       KnownRange r;
-      // and X, C (C non-negative): [0, C]. Works for any rR/lR with a
-      // non-negative upper bound, not just explicit ConstantInt operands.
+      // and X, C for non-negative C yields [0, C]. Applies to any operand with
+      // a non-negative upper bound.
       auto tryConst = [&](const KnownRange *xR, const KnownRange *cR) {
         if (cR && cR->u && !cR->u->second.isNegative())
           r.u = {llvm::APInt::getZero(bw), cR->u->second};
@@ -240,12 +231,11 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
 
     case llvm::Instruction::URem: {
-      // Requires a non-zero divisor lower bound to avoid division-by-zero
-      // poison. Works for both constant and non-constant divisors.
+      // Non-zero divisor lower bound avoids division-by-zero poison.
       if (!rR || !rR->u || rR->u->first.isZero())
         return std::nullopt;
       KnownRange r;
-      // result ∈ [0, hi_d - 1] since urem(x, d) < d for any d > 0.
+      // result in [0, hi_d - 1] because urem(x, d) < d for any d > 0.
       r.u = {llvm::APInt::getZero(bw), rR->u->second - 1};
       r.bits = llvm::KnownBits::urem(knownBitsOf(BO->getOperand(0), map),
                                      knownBitsOf(BO->getOperand(1), map));
@@ -257,11 +247,10 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
 
     case llvm::Instruction::UDiv: {
-      // Requires a non-zero divisor lower bound and a known dividend range.
-      // Works for both constant and non-constant divisors.
+      // Requires non-zero divisor lower bound and known dividend bounds.
       if (!rR || !rR->u || rR->u->first.isZero() || !lR || !lR->u)
         return std::nullopt;
-      // result ∈ [lo_x / hi_d, hi_x / lo_d].
+      // result in [lo_x / hi_d, hi_x / lo_d].
       KnownRange r;
       r.u = {lR->u->first.udiv(rR->u->second),
              lR->u->second.udiv(rR->u->first)};
@@ -275,8 +264,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
 
     case llvm::Instruction::LShr: {
-      // Shift amount must be provably < bitwidth (for both constant and
-      // non-constant amounts whose range upper bound is < bitwidth).
+      // Shift amount must be provably less than bitwidth.
       auto [in_range, const_shift] = shiftInRange(BO->getOperand(1), bw, rR);
       if (!in_range)
         return std::nullopt;
@@ -288,7 +276,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
           r.u = {lR->u->first.lshr(const_shift),
                  lR->u->second.lshr(const_shift)};
         } else if (rR && rR->u) {
-          // Variable shift ∈ [lo_amt, hi_amt]:
+          // Variable shift in [lo_amt, hi_amt]:
           //   min result = lo_x >> hi_amt (smallest x shifted the most)
           //   max result = hi_x >> lo_amt (largest x shifted the least)
           unsigned hi_amt = (unsigned)rR->u->second.getLimitedValue();
@@ -309,7 +297,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
 
     case llvm::Instruction::AShr: {
-      // Shift amount must be provably < bitwidth.
+      // Shift amount must be provably less than bitwidth.
       auto [in_range, const_shift] = shiftInRange(BO->getOperand(1), bw, rR);
       if (!in_range)
         return std::nullopt;
@@ -321,7 +309,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
           r.s = {lR->s->first.ashr(const_shift),
                  lR->s->second.ashr(const_shift)};
         } else if (rR && rR->u) {
-          // Variable shift ∈ [lo_amt, hi_amt]:
+          // Variable shift in [lo_amt, hi_amt]:
           //   tightest signed bound uses lo_amt (least shift):
           //   min result = lo_x >> lo_amt, max result = hi_x >> lo_amt.
           unsigned lo_amt = (unsigned)rR->u->first.getLimitedValue();
@@ -341,7 +329,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
 
     case llvm::Instruction::Shl: {
-      // Shift amount must be provably < bitwidth.
+      // Shift amount must be provably less than bitwidth.
       auto [in_range, const_shift] = shiftInRange(BO->getOperand(1), bw, rR);
       if (!in_range)
         return std::nullopt;
@@ -381,9 +369,8 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
           /*Add=*/true, nsw, nuw, knownBitsOf(BO->getOperand(0), map),
           knownBitsOf(BO->getOperand(1), map));
       r.undef_free = (lR && lR->undef_free) && (rR && rR->undef_free);
-      // Plain add always wraps without producing poison. nuw/nsw add may
-      // produce poison on overflow; only assert poison_free when bounds were
-      // derived (proving the result fits, so no overflow occurred).
+      // Wrapping addition cannot produce poison. For nuw and nsw addition,
+      // poison_free is established only when bounds confirm absence of wrap.
       if (!(nuw || nsw) || r.u || r.s)
         r.poison_free = (lR && lR->poison_free) && (rR && rR->poison_free);
       if (!r.u && !r.s && !r.well_defined() && (!r.bits || r.bits->isUnknown()))
@@ -406,7 +393,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
           /*Add=*/false, nsw, nuw, knownBitsOf(BO->getOperand(0), map),
           knownBitsOf(BO->getOperand(1), map));
       r.undef_free = (lR && lR->undef_free) && (rR && rR->undef_free);
-      // Plain sub wraps without producing poison.
+      // Wrapping subtraction cannot produce poison.
       if (!(nuw || nsw) || r.u || r.s)
         r.poison_free = (lR && lR->poison_free) && (rR && rR->poison_free);
       if (!r.u && !r.s && !r.well_defined() && (!r.bits || r.bits->isUnknown()))
@@ -428,7 +415,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
       r.bits = llvm::KnownBits::mul(knownBitsOf(BO->getOperand(0), map),
                                     knownBitsOf(BO->getOperand(1), map));
       r.undef_free = (lR && lR->undef_free) && (rR && rR->undef_free);
-      // Plain mul wraps without producing poison.
+      // Wrapping multiplication cannot produce poison.
       if (!(nuw || nsw) || r.u || r.s)
         r.poison_free = (lR && lR->poison_free) && (rR && rR->poison_free);
       if (!r.u && !r.s && !r.well_defined() && (!r.bits || r.bits->isUnknown()))
@@ -443,7 +430,7 @@ std::optional<KnownRange> transfer(const llvm::Instruction *I,
     }
   }
 
-  // ── casts ──────────────────────────────────────────────────────────────────
+  // casts
   if (auto *cast = llvm::dyn_cast<llvm::CastInst>(I)) {
     const KnownRange *srcR = rangeOf(cast->getOperand(0), map, srcS);
     if (!srcR)

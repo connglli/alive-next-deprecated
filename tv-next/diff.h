@@ -1,19 +1,10 @@
-// alive-tv-next: structural diff between paired @src and @tgt functions.
+// Structural diffing between paired @src and @tgt functions.
 //
-// Phase 1 (M1.2):
-//   - Single basic block on each side.
-//   - Equal instruction count.
-//   - Per-line textual comparison: each (src_inst, tgt_inst) pair is either
-//     "identical" (same printed form modulo metadata) or a diff position.
+// Identifies instruction-level differences between single-basic-block
+// functions and clusters differences into DiffRegions for verification.
 //
-// Phase 2 (M2.1):
-//   - Diff positions are grouped into runs of *consecutive* diffs. An
-//     identical position breaks a run. A 1-position region recovers Phase
-//     1's single-instr-unit behaviour; multi-position regions are lifted
-//     jointly into one TvUnit (see unit.h, buildTvUnit).
-//
-// Multi-BB and asymmetric (different src/tgt instruction counts) cases land
-// in later phases.
+// Symmetric regions pair instructions at matching positions. Asymmetric
+// regions group differing instruction sequences with mismatched counts.
 
 #pragma once
 
@@ -25,38 +16,26 @@
 
 namespace alive_tv_next {
 
-// One position in the function where @src and @tgt differ at the
-// instruction level.
+// Instruction-level difference between src and tgt at matching block offset.
 struct DiffPosition {
-  // Index of the instruction inside the (single) basic block, 0-based,
-  // counting only non-terminator instructions in the iteration order.
+  // Index of the instruction in the basic block, 0-based, excluding
+  // terminators.
   size_t inst_idx;
 
-  // The differing instructions. Pointers into the loaded modules; valid
-  // for the lifetime of the LoadedSrcTgt that produced them.
+  // Pointers to the differing instructions in their respective modules.
   llvm::Instruction *src_inst;
   llvm::Instruction *tgt_inst;
 };
 
-// A run of consecutive diff positions, sorted ascending by inst_idx.
-// Positions in the same region are lifted together into one TvUnit and
-// verified jointly.
+// A contiguous sequence of differences lifted and verified as a single unit.
 //
-// Two shapes:
+// In a symmetric region (is_asymmetric is false), positions is non-empty and
+// contains paired instructions. The exit instruction is positions.back().
 //
-//   Symmetric region (is_asymmetric == false):
-//     `positions` is non-empty; src and tgt have the same number of
-//     differing instructions in the run. The region's exit instruction is
-//     `positions.back()`; its value type is the TvUnit's return type.
-//
-//   Asymmetric region (is_asymmetric == true):
-//     `positions` is empty. `src_region` and `tgt_region` hold the full
-//     instruction lists for each side of the changed region (possibly
-//     different lengths). The TvUnit exits at `src_region.back()` /
-//     `tgt_region.back()` — the last instruction on each side (must share
-//     a type). `src_start_idx` / `tgt_start_idx` are 0-based indices into
-//     the parent function's non-terminator instruction list, for
-//     diagnostics only.
+// In an asymmetric region (is_asymmetric is true), positions is empty.
+// src_region and tgt_region store the differing instruction sequences on each
+// side. The exit instructions are src_region.back() and tgt_region.back(),
+// which must share the same type.
 struct DiffRegion {
   std::vector<DiffPosition> positions;
 
@@ -67,15 +46,18 @@ struct DiffRegion {
   size_t tgt_start_idx = 0;
 };
 
+// Results of structural diffing across two functions.
 struct DiffResult {
   std::vector<DiffRegion> regions;
-  // How many positions matched textually (for verbose reporting).
+  // Number of non-terminator instruction pairs that matched textually.
   size_t identical_count = 0;
 };
 
-// Compute the per-line diff and group consecutive diffs into DiffRegions.
-// Returns std::nullopt and prints a diagnostic on errs() if the Phase 1
-// preconditions are violated (multi-BB, BB length mismatch).
+// Computes instruction differences and groups them into DiffRegions.
+//
+// Both functions must contain exactly one basic block, and their terminators
+// must match textually modulo trailing metadata. Returns std::nullopt and
+// writes a diagnostic to llvm::errs() if either condition is violated.
 std::optional<DiffResult> computeDiffRegions(llvm::Function &src,
                                              llvm::Function &tgt);
 

@@ -1,17 +1,14 @@
-; Example 1' — variant of Example 1 with ptrtoint and add commutativity.
+; Example 1': single-instruction substitution with identity cast.
 ;
-; Source: real corpus slice; nearly isomorphic to Example 1 but adds:
-;   - a ptrtoint at v0 that's identical between src and tgt (identity path)
-;   - add-commutativity at v7 (sibling of mul-comm)
+; Instruction differences:
+;   v2: sdiv exact i64 _, 8  -> ashr exact i64 _, 3
+;   v4: mul nsw i64 a, b     -> mul nsw i64 b, a
+;   v6: sdiv exact i64 _, 16 -> ashr exact i64 _, 4
+;   v7: add nsw i64 a, b     -> add nsw i64 b, a
 ;
-; Diff:
-;   v2: sdiv exact i64 _, 8  → ashr exact i64 _, 3       (catalog L1)
-;   v4: mul nsw i64 a, b     → mul nsw i64 b, a          (catalog L3 mul-comm)
-;   v6: sdiv exact i64 _, 16 → ashr exact i64 _, 4       (catalog L2)
-;   v7: add nsw i64 a, b     → add nsw i64 b, a          (catalog add-comm)
-;
-; alive-tv-next target: same as Example 1 plus add-comm catalog entry; the
-; ptrtoint at v0 takes the identity path (no cut needed).
+; Verification:
+;   The ptrtoint at v0 matches textually and satisfies identity matching.
+;   The four differences lift into single-instruction TvUnit instances.
 
 define i64 @src(ptr %p0, i64 %p1, i64 %p2, i64 %p3, i64 %p4, i64 %p5) {
 entry:
